@@ -46,6 +46,19 @@ foreach($file in 'whisper-cli.exe','whisper.dll','ggml.dll','ggml-base.dll','ggm
 Copy-Item -LiteralPath $model -Destination $speech
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Whisper-LICENSE.txt') -Destination (Join-Path $speech 'LICENSE.txt')
 
+$runtimeFiles = Get-ChildItem -LiteralPath $stage -File -Recurse | Where-Object {
+    $_.FullName -ne (Join-Path $stage 'resources\default_app.asar') -and
+    (!$_.FullName.StartsWith($app + '\', [StringComparison]::OrdinalIgnoreCase) -or
+      $_.FullName.StartsWith($speech + '\', [StringComparison]::OrdinalIgnoreCase))
+}
+$runtimeEntries = foreach($file in $runtimeFiles) {
+    $relative = $file.FullName.Substring($stage.Length + 1)
+    $folder = Split-Path $relative -Parent
+    $digest = (Get-FileHash -LiteralPath $file.FullName).Hash
+    'Source: "{0}"; DestDir: "{{app}}\{1}"; Flags: ignoreversion; Check: RuntimeChanged(''{2}'', ''{3}'')' -f $file.FullName,$folder,$relative,$digest
+}
+$runtimeEntries | Set-Content -LiteralPath (Join-Path $stage 'runtime-files.iss') -Encoding utf8NoBOM
+
 if(!$Compiler) {
     $Compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
     if(!$Compiler) {

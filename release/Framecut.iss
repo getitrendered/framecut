@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.5.2"
+  #define AppVersion "0.5.3"
 #endif
 #ifndef StageRoot
   #define StageRoot "..\build\package"
@@ -29,7 +29,8 @@ Compression=lzma2/fast
 WizardStyle=modern
 
 [Files]
-Source: "{#StageRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "resources\default_app.asar"
+#include StageRoot + "\runtime-files.iss"
+Source: "{#StageRoot}\resources\app\*"; DestDir: "{app}\resources\app"; Flags: ignoreversion; Excludes: "runtime-files.iss"
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked; Check: StandardInstall
@@ -45,4 +46,14 @@ Filename: "{app}\Framecut.exe"; Description: "Open Framecut"; Flags: nowait post
 function StandardInstall: Boolean;
 begin
   Result := ExpandConstant('{param:framecut-portable|0}') <> '1';
+end;
+
+function RuntimeChanged(RelativePath, Digest: String): Boolean;
+var
+  Destination: String;
+begin
+  Destination := ExpandConstant('{app}\') + RelativePath;
+  Result := True;
+  if FileExists(Destination) then
+    Result := CompareText(GetSHA256OfFile(Destination), Digest) <> 0;
 end;
