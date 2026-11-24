@@ -54,6 +54,7 @@ let duration = 0;
 let cursor = 0;
 let zoom = Number(zoomInput.value);
 let selected = null;
+let timelineClipboard = null;
 let active = players[0];
 let activeClip = null;
 let playing = false;
@@ -430,6 +431,101 @@ function removeClip(ripple = false) {
     list.splice(list.indexOf(clip), 1);
     selected = null;
   });
+}
+
+function copyTimelineClip(cut = false) {
+  const clip = selection();
+  if (!clip) return;
+  timelineClipboard = { clip: structuredClone(clip), cut };
+  if (cut) removeClip();
+  notify(cut ? 'Clip cut. Paste at the playhead.' : 'Clip copied. Paste at the playhead.');
+}
+
+function pasteTimelineClip(at = cursor) {
+  if (!timelineClipboard?.clip) return;
+  const clip = structuredClone(timelineClipboard.clip);
+  const originalExists = [...project.clips, ...project.overlays, ...project.sounds, ...project.titles]
+    .some(item => item.id === clip.id);
+  if (!timelineClipboard.cut || originalExists) {
+    clip.id = id();
+    delete clip.extractedFrom;
+  }
+  clip.start = freeStart(layerItems(clip), Math.max(0, at), clip.len);
+  change(() => {
+    clipList(clip).push(clip);
+    if (clip.kind === 'audio') project.audioLayers = Math.max(project.audioLayers, clip.track);
+    else if (clip.asset && clip.track) project.layers = Math.max(project.layers, clip.track);
+    else if (!clip.asset && clip.style !== 'caption') project.titleLayers = Math.max(project.titleLayers, clip.track || 1);
+    selected = clip.id;
+  });
+  timelineClipboard.cut = false;
+  setPosition(clip.start);
+  revealCursor();
+  notify(clip.start === at ? 'Clip pasted.' : 'Clip pasted at the next open position on its track.');
+}
+
+function copyFootage(cut) {
+  const asset = bin.get(sourceAsset);
+  if (!asset) return false;
+  timelineClipboard = { asset:asset.id, move:cut };
+  reportImport(cut ? 'Footage ready to move. Open a folder and paste.' : 'Footage copied. Open Edit and paste into the timeline.');
+  return true;
+}
+
+function copyKeyframe(dot, cut) {
+  const clip = selection();
+  const { property, frame } = dot.dataset;
+  const at = Number(frame);
+  const keyframes = clip?.motion?.[property];
+  if (!keyframes?.some(([position]) => position === at)) return false;
+  timelineClipboard = { keyframe:{ property, value:valueAt(clip,property,at) } };
+  if (cut) change(() => { clip.motion[property] = keyframes.filter(([position]) => position !== at); });
+  notify(cut ? 'Keyframe cut.' : 'Keyframe copied.');
+  return true;
+}
+
+function pasteEditorItem() {
+  if (!timelineClipboard) return false;
+  if (page === 'footage') {
+    if (!timelineClipboard.move || !bin.has(timelineClipboard.asset)) return false;
+    if (folder === 'all') {
+      reportImport('Select a destination folder, then paste.');
+      return true;
+    }
+    moveAsset(timelineClipboard.asset, folder);
+    timelineClipboard.move = false;
+    reportImport('Footage moved.');
+    return true;
+  }
+  if (timelineClipboard.clip) {
+    pasteTimelineClip();
+    return true;
+  }
+  if (bin.has(timelineClipboard.asset)) {
+    if (timelineClipboard.move) {
+      notify('Paste cut footage into a folder in Footage.');
+      return true;
+    }
+    insertVideo(timelineClipboard.asset, project.clips.length, cursor);
+    notify('Footage pasted into the timeline.');
+    return true;
+  }
+  const clip = selection();
+  const keyframe = timelineClipboard.keyframe;
+  if (!keyframe || page !== 'animation' || !clip || clip.kind === 'audio') return false;
+  const {property,value} = keyframe;
+  const at = cursor - clipStart(clip);
+  if (at < 0 || at >= clip.len) {
+    notify('Move the playhead inside the selected clip to paste the keyframe.');
+    return true;
+  }
+  change(() => {
+    clip.motion ||= {};
+    const others = (clip.motion[property] || []).filter(([frame]) => frame !== at);
+    clip.motion[property] = [...others,[at,value]].sort((a,b) => a[0]-b[0]);
+  });
+  notify('Keyframe pasted at the playhead.');
+  return true;
 }
 
 function splitPosition() {
@@ -1472,11 +1568,14 @@ function renderKeyLanes() {
     for (const [frame] of points(clip,key).filter(([at]) => at < clip.len)) {
       const dot = button('◆', () => {});
       dot.className = 'key-dot';
+      dot.dataset.property = key;
+      dot.dataset.frame = frame;
       dot.style.left = `calc(${start + frame} * var(--frame-width))`;
       dot.title = `${properties[key][0]} at ${timecode(start + frame)}`;
       dot.onpointerdown = event => {
         event.stopPropagation();
         event.preventDefault();
+        dot.focus({ preventScroll:true });
         const initial = event.clientX;
         dot.setPointerCapture(event.pointerId);
         dot.onpointermove = move => {
@@ -2104,11 +2203,15 @@ space.addEventListener('contextmenu',event=>{
     select(element.dataset.id);
     setPosition(at);
     const clip=selection();
+    action('Cut (Ctrl+X)',()=>copyTimelineClip(true));
+    action('Copy (Ctrl+C)',()=>copyTimelineClip());
+    action('Paste (Ctrl+V)',()=>{setPosition(at);pasteEditorItem();},!timelineClipboard);
     action('Split at playhead',splitClip,!splitPosition());
     action('Delete · leave gap',()=>removeClip(false));
     action('Ripple delete · close gap',()=>removeClip(true));
     if(clip.asset && clip.kind!=='audio' && bin.get(clip.asset)?.audio!=null) action('Extract audio',()=>extractAudio(clip),project.sounds.some(item=>item.extractedFrom===clip.id));
   } else if(lane){
+    action('Paste (Ctrl+V)',()=>{setPosition(at);pasteEditorItem();},!timelineClipboard);
     const number=Number(lane.dataset.layer);
     const peers=lane.dataset.type==='video' ? (number?project.overlays.filter(item=>item.track===number):project.clips)
       : lane.dataset.type==='audio' ? project.sounds.filter(item=>item.track===number)
@@ -2338,8 +2441,19 @@ $('audio-file').onchange = async event => {
 };
 
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented || event.target.closest('input,select,textarea,dialog') || $('export-dialog').open) return;
-  if (event.ctrlKey && ['z', 'y'].includes(event.key.toLowerCase())) {
+  if (event.defaultPrevented || event.target.isContentEditable ||
+      event.target.closest('input,select,textarea,dialog') || document.querySelector('dialog[open]')) return;
+  const key = event.key.toLowerCase();
+  if (event.ctrlKey && !event.altKey && !event.shiftKey && ['c','x','v'].includes(key)) {
+    if (event.repeat) { event.preventDefault(); return; }
+    const dot = page === 'animation' ? event.target.closest('.key-dot') : null;
+    let handled = false;
+    if (key === 'v') handled = pasteEditorItem();
+    else if (page === 'footage') handled = copyFootage(key === 'x');
+    else if (dot) handled = copyKeyframe(dot,key === 'x');
+    else if (selection()) { copyTimelineClip(key === 'x'); handled = true; }
+    if (handled) event.preventDefault();
+  } else if (event.ctrlKey && ['z', 'y'].includes(key)) {
     event.preventDefault();
     if (event.key.toLowerCase() === 'y' || event.shiftKey) history(redo, undo);
     else history(undo, redo);
