@@ -2,9 +2,13 @@ $ErrorActionPreference = 'Stop'
 $job = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload64)) | ConvertFrom-Json
 $result = @{ version = $job.installer.version; ok = $false }
 try {
-    Wait-Process -Id $job.pid -Timeout 45 -ErrorAction SilentlyContinue
-    if (Get-Process -Id $job.pid -ErrorAction SilentlyContinue) { throw 'Framecut did not close before the update.' }
-    $digest = (Get-FileHash -LiteralPath $job.installer.path -Algorithm SHA256).Hash
+    $running = $null
+    try { $running = [Diagnostics.Process]::GetProcessById([int]$job.pid) } catch [ArgumentException] {}
+    if ($running -and !$running.WaitForExit(45000)) { throw 'Framecut did not close before the update.' }
+    $hash = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($job.installer.path)
+    try { $digest = [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '') }
+    finally { $stream.Dispose(); $hash.Dispose() }
     if ($digest -ne $job.installer.digest) { throw 'The saved installer failed verification.' }
     $directory = Split-Path -LiteralPath $job.executable
     $log = Join-Path (Split-Path -LiteralPath $job.statusFile) 'update-install.log'
@@ -19,7 +23,7 @@ try {
 } catch {
     $result.error = $_.Exception.Message
 }
-$result | ConvertTo-Json -Compress | Set-Content -LiteralPath $job.statusFile -Encoding UTF8
+[IO.File]::WriteAllText($job.statusFile, ($result | ConvertTo-Json -Compress))
 if (Test-Path -LiteralPath $job.executable -PathType Leaf) {
     Start-Process -FilePath $job.executable -ArgumentList ('--user-data-dir="' + $job.profile + '"')
 }

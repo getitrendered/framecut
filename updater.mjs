@@ -1,8 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, readFile, rename, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
@@ -177,12 +177,17 @@ export async function startWindowsUpdate({ installer, executable, profile, statu
   const script = await readFile(new URL('./update-runner.ps1',import.meta.url),'utf8');
   const info = Buffer.from(JSON.stringify({ installer, executable, profile, statusFile, pid:process.pid })).toString('base64');
   const encoded = Buffer.from(`$payload64 = '${info}'\n${script}`,'utf16le').toString('base64');
-  const child = spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{
-    windowsHide:true, detached:true, stdio:'ignore'
-  });
-  await new Promise((resolve,reject)=>{
-    child.once('spawn',resolve);
-    child.once('error',reject);
-  });
-  child.unref();
+  const log = await open(join(dirname(statusFile),'update-helper.log'),'w');
+  try {
+    const child = spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{
+      windowsHide:true, stdio:['ignore',log.fd,log.fd]
+    });
+    await new Promise((resolve,reject)=>{
+      child.once('spawn',resolve);
+      child.once('error',reject);
+    });
+    child.unref();
+  } finally {
+    await log.close();
+  }
 }
