@@ -714,6 +714,7 @@ function renderSource() {
 function stillSource(id) { return sourceAsset===id; }
 
 function switchPage(next) {
+  finishSelectionBox(null,true);
   if (next === 'projects' && busySwitch()) return;
   if (next !== 'projects' && !entry) return;
   if (page === 'led' && next !== 'led') led.suspend();
@@ -843,13 +844,21 @@ function select(key, {toggle=false, range=false, preserve=false} = {}) {
   }
   selectedGroup.delete(selected);
   selectedGroup.delete(null);
+  refreshSelection();
+}
+
+function drawClipSelection(preview) {
+  for (const clip of space.querySelectorAll('.clip')) {
+    const active = preview ? preview.has(clip.dataset.id) : isSelected(clip.dataset.id);
+    clip.classList.toggle('selected',active);
+    if (!preview) clip.setAttribute('aria-pressed',String(active));
+  }
+}
+
+function refreshSelection() {
   const clip=selection();
   if(clip) selectTrack(trackOf(clip));
-  for (const clip of space.querySelectorAll('.clip')) {
-    const active = isSelected(clip.dataset.id);
-    clip.classList.toggle('selected',active);
-    clip.setAttribute('aria-pressed',String(active));
-  }
+  drawClipSelection();
   renderInspector();
   renderKeyLanes();
   renderTools();
@@ -2903,20 +2912,27 @@ function fitClip(peers,desired,len,ignore) {
 let scrubPointerX=0;
 let scrubFrame=0;
 let scrubLast=0;
+const timelineGrid = scroll.closest('.timeline-grid');
+const selectionBox = $('selection-box');
+let boxSelection = null;
+
+function edgeScrollDelta(position, low, high, elapsed) {
+  const zone = Math.min(45, (high-low)/4);
+  const edge = position<low+zone ? position-low-zone : Math.max(0,position-high+zone);
+  const delta = clamp(edge*16,-1350,1350)*elapsed;
+  return delta ? Math.sign(delta)*Math.max(1,Math.abs(delta)) : 0;
+}
+
 function scrollWhileScrubbing(now) {
   scrubFrame=0;
   if(!space.dataset.scrub) return;
   const view=scroll.getBoundingClientRect();
-  const zone=Math.min(45,view.width/4);
-  let speed=0;
-  if(scrubPointerX<view.left+zone) speed=-Math.min(1350,(view.left+zone-scrubPointerX)*16);
-  else if(scrubPointerX>view.right-zone) speed=Math.min(1350,(scrubPointerX-view.right+zone)*16);
   const elapsed=scrubLast?Math.min(.04,(now-scrubLast)/1000):1/60;
   scrubLast=now;
-  if(speed){
+  const delta=edgeScrollDelta(scrubPointerX,view.left,view.right,elapsed);
+  if(delta){
     const left=scroll.scrollLeft;
-    const delta=speed*elapsed;
-    setTimelineScroll(left+(delta<0?Math.min(-1,delta):Math.max(1,delta)));
+    setTimelineScroll(left+delta);
     if(scroll.scrollLeft!==left) setPosition(frameAt(clamp(scrubPointerX,view.left,view.right)));
   }
   scrubFrame=requestAnimationFrame(scrollWhileScrubbing);
@@ -2928,9 +2944,104 @@ function endScrub() {
   scrubFrame=scrubLast=0;
 }
 
-space.addEventListener('pointerdown', event => {
-  if (event.button !== 0 || event.target.closest('.clip')) return;
+function boxViewport() {
+  const view = scroll.getBoundingClientRect();
+  const gridTop = timelineGrid.getBoundingClientRect().top;
+  return { left:view.left, right:view.left+scroll.clientWidth, top:Math.max(view.top,gridTop),
+    bottom:Math.min(view.bottom,gridTop+timelineGrid.clientHeight) };
+}
+
+function drawSelectionBox(box, view) {
+  const bounds = space.getBoundingClientRect();
+  const x = clamp(box.x,view.left,view.right)-bounds.left;
+  const y = clamp(box.y,view.top,view.bottom)-bounds.top;
+  const left = Math.min(box.startX,x), top = Math.min(box.startY,y);
+  const right = Math.max(box.startX,x), bottom = Math.max(box.startY,y);
+  Object.assign(selectionBox.style,{ left:`${left}px`,top:`${top}px`,width:`${Math.max(1,right-left)}px`,height:`${Math.max(1,bottom-top)}px` });
+  box.keys = new Set(box.existing);
+  for (const clip of box.clips) {
+    if (clip.left<right && clip.right>left && clip.top<bottom && clip.bottom>top) box.keys.add(clip.id);
+  }
+  drawClipSelection(box.keys);
+}
+
+function scrollWhileSelecting(now) {
+  const box = boxSelection;
+  if (!box?.active) return;
+  const elapsed = box.last ? Math.min(.04,(now-box.last)/1000) : 1/60;
+  box.last = now;
+  const view = boxViewport();
+  const dx = edgeScrollDelta(box.x,view.left,view.right,elapsed);
+  const dy = edgeScrollDelta(box.y,view.top,view.bottom,elapsed);
+  if (dx) setTimelineScroll(scroll.scrollLeft+dx);
+  if (dy) timelineGrid.scrollTop += dy;
+  if (box.dirty || box.left!==scroll.scrollLeft || box.top!==timelineGrid.scrollTop) {
+    box.dirty = false;
+    box.left = scroll.scrollLeft;
+    box.top = timelineGrid.scrollTop;
+    drawSelectionBox(box,boxViewport());
+  }
+  box.raf = requestAnimationFrame(scrollWhileSelecting);
+}
+
+function moveSelectionBox(event) {
+  const box = boxSelection;
+  if (!box || event.pointerId!==box.pointerId) return;
+  box.x = event.clientX;
+  box.y = event.clientY;
+  box.dirty = true;
+  if (box.active || Math.hypot(box.x-box.originX,box.y-box.originY)<4) return;
+  box.active = true;
+  const bounds = space.getBoundingClientRect();
+  box.clips = [...space.querySelectorAll('.clip')].map(clip=>{
+    const rect = clip.getBoundingClientRect();
+    return { id:clip.dataset.id, left:rect.left-bounds.left, right:rect.right-bounds.left,
+      top:rect.top-bounds.top, bottom:rect.bottom-bounds.top };
+  });
+  selectionBox.hidden = false;
+  box.raf = requestAnimationFrame(scrollWhileSelecting);
+}
+
+function finishSelectionBox(event, cancel = false) {
+  const box = boxSelection;
+  if (!box || (event && event.pointerId!==box.pointerId)) return;
+  if (event && !cancel) moveSelectionBox(event);
+  boxSelection = null;
+  cancelAnimationFrame(box.raf);
+  selectionBox.hidden = true;
+  if (space.hasPointerCapture(box.pointerId)) space.releasePointerCapture(box.pointerId);
+  if (cancel) return drawClipSelection();
+  if (!box.active) {
+    if (box.additive) return;
+    select(null);
+    if (box.track) selectTrack(box.track);
+    setPosition(frameAt(box.originX));
+    return;
+  }
+  drawSelectionBox(box,boxViewport());
+  const keys = new Set(clipsIn(project).filter(clip=>box.keys.has(clip.id)).map(clip=>clip.id));
+  selected = keys.has(selected) ? selected : [...keys][0] ?? null;
+  keys.delete(selected);
+  selectedGroup = keys;
+  selectionAnchor = selected;
+  refreshSelection();
+}
+
+scroll.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || !event.isPrimary || event.target.closest('.clip, .key-dot')) return;
   space.setPointerCapture(event.pointerId);
+  if (!event.target.closest('#ruler, #playhead')) {
+    pause();
+    const bounds = space.getBoundingClientRect();
+    const additive = event.ctrlKey || event.metaKey;
+    boxSelection = {
+      pointerId:event.pointerId, originX:event.clientX, originY:event.clientY,
+      startX:event.clientX-bounds.left, startY:event.clientY-bounds.top,
+      track:event.target.closest('[data-track-key]')?.dataset.trackKey,
+      additive, existing:additive ? selectedClips().map(clip=>clip.id) : [], raf:0
+    };
+    return;
+  }
   space.dataset.scrub = 'yes';
   scrubPointerX=event.clientX;
   if (!event.target.closest('.playhead')) {
@@ -3005,7 +3116,8 @@ $('activity-close').onclick=()=>{
 };
 void refreshActivity();
 space.addEventListener('pointermove', event => {
-  if (drag) dragClip(event);
+  if (boxSelection) moveSelectionBox(event);
+  else if (drag) dragClip(event);
   else if (space.dataset.scrub) {
     scrubPointerX=event.clientX;
     const view=scroll.getBoundingClientRect();
@@ -3013,15 +3125,20 @@ space.addEventListener('pointermove', event => {
   }
 });
 space.addEventListener('pointerup', event => {
+  if (boxSelection) return finishSelectionBox(event);
   endScrub();
   if(drag?.moved) dragClip(event);
   endClipDrag();
 });
-space.addEventListener('pointercancel', () => {
+space.addEventListener('pointercancel', event => {
+  finishSelectionBox(event,true);
   endScrub();
   endClipDrag(true);
 });
-space.addEventListener('lostpointercapture',endScrub);
+space.addEventListener('lostpointercapture',event=>{
+  finishSelectionBox(event,true);
+  endScrub();
+});
 
 function hideTimelineMenu() { $('timeline-menu').hidden=true; }
 function showTimelineMenu(event) {
@@ -3103,7 +3220,11 @@ space.addEventListener('contextmenu',event=>{
   showTimelineMenu(event);
 });
 document.addEventListener('pointerdown',event=>{ if(!event.target.closest('#timeline-menu')) hideTimelineMenu(); });
-document.addEventListener('keydown',event=>{ if(event.key==='Escape') hideTimelineMenu(); });
+document.addEventListener('keydown',event=>{
+  if (event.key!=='Escape') return;
+  finishSelectionBox(null,true);
+  hideTimelineMenu();
+});
 
 const hasFiles = event => Array.from(event.dataTransfer.types).includes('Files');
 const hasAsset = event => Array.from(event.dataTransfer.types).includes('application/x-framecut-asset');
@@ -3185,7 +3306,7 @@ scroll.closest('.timeline').addEventListener('wheel', event => {
     return;
   }
   event.preventDefault();
-  if (drag || space.dataset.scrub) return;
+  if (drag || boxSelection || space.dataset.scrub) return;
   wheelDelta += delta * unit;
   wheelAnchor = clamp(event.clientX - scroll.getBoundingClientRect().left, 0, scroll.clientWidth);
   if (wheelFrame) return;

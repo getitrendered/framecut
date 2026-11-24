@@ -151,12 +151,13 @@
             <div id="key-lanes"></div>
             <div id="playhead" class="playhead" title="Drag to scrub" aria-label="Playhead"><span></span></div>
             <div id="drop-marker" class="drop-marker" hidden></div>
+            <div id="selection-box" aria-hidden="true" hidden></div>
           </div>
         </div>
       </div>
       <div class="timeline-pan-row"><div id="timeline-pan" aria-label="Horizontal timeline scroll" tabindex="0"><div id="timeline-pan-content"></div></div></div>
       <div id="resize-tracks" class="pane-grip row-grip" role="separator" aria-label="Resize timeline tracks" aria-orientation="horizontal" tabindex="0"></div>
-      <footer><span id="status" role="status">Ready</span><span class="shortcuts">Space play · S split · Delete remove</span></footer>
+      <footer><span id="status" role="status">Ready</span><span class="shortcuts" title="Drag from an empty part of a track. Hold Ctrl to add to the selection.">Drag empty space to select · Space play · S split</span></footer>
     </section>
   </main>
   <dialog id="sequence-dialog" aria-labelledby="sequence-dialog-title">
