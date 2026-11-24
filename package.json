@@ -1,7 +1,8 @@
 {
   "name": "framecut",
   "productName": "Framecut",
-  "version": "0.5.3",
+  "version": "0.5.4",
+  "runtimeId": "electron45.4.1-whisper1.8.6-baseq5",
   "private": true,
   "main": "desktop.mjs"
 }

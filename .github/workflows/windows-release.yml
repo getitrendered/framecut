@@ -43,15 +43,15 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $notes = "release/notes/$($tag.Substring(1)).md"
-          $artifact = 'dist/Framecut-Setup-x64.exe'
+          $artifacts = Get-ChildItem dist -File | Select-Object -ExpandProperty FullName
           gh release view $tag --json isDraft > $null 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $artifact --clobber
+            gh release upload $tag @artifacts --clobber
             if ($LASTEXITCODE) { exit $LASTEXITCODE }
             gh release edit $tag --draft=false --latest
           } elseif (Test-Path -LiteralPath $notes) {
-            gh release create $tag $artifact --verify-tag --title "Framecut $($tag.Substring(1))" --notes-file $notes --latest
+            gh release create $tag @artifacts --verify-tag --title "Framecut $($tag.Substring(1))" --notes-file $notes --latest
           } else {
-            gh release create $tag $artifact --verify-tag --title "Framecut $($tag.Substring(1))" --generate-notes --latest
+            gh release create $tag @artifacts --verify-tag --title "Framecut $($tag.Substring(1))" --generate-notes --latest
           }
           exit $LASTEXITCODE

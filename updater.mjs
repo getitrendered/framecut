@@ -44,7 +44,7 @@ function allowedDownload(url) {
     (url.hostname === 'api.github.com' || url.hostname === 'github.com' || url.hostname.endsWith('.githubusercontent.com'));
 }
 
-export function createUpdater({ repository, privateRepo, currentVersion, cache, broadcast,
+export function createUpdater({ repository, privateRepo, currentVersion, runtimeId, cache, broadcast,
   request=fetch, credentials=githubToken }) {
   if (!/^[a-z\d][a-z\d-]{0,38}\/[a-z\d_.-]{1,100}$/i.test(repository)) throw new Error('Invalid update repository.');
   const base = `${github}/repos/${repository}`;
@@ -83,12 +83,15 @@ export function createUpdater({ repository, privateRepo, currentVersion, cache, 
           update({phase:'current',version:null,notes:null,title:null,progress:null,error:null});
           return state;
         }
-        const asset = next.assets?.find(item => item.name === releaseAsset && item.state === 'uploaded');
+        const patchName = /^[a-z\d.-]+$/i.test(runtimeId || '') ? `Framecut-App-${runtimeId}.zip` : null;
+        const uploaded = next.assets?.filter(item=>item.state==='uploaded') || [];
+        const asset = uploaded.find(item=>item.name===patchName) || uploaded.find(item=>item.name===releaseAsset);
         if (!asset || !Number.isSafeInteger(asset.id) || !Number.isSafeInteger(asset.size) || asset.size <= 0 ||
             !/^sha256:[a-f\d]{64}$/i.test(asset.digest || '')) {
           throw new Error('The GitHub release is missing a verified Windows installer.');
         }
-        release = { id:asset.id, size:asset.size, digest:asset.digest.slice(7).toLowerCase() };
+        release = { id:asset.id, size:asset.size, digest:asset.digest.slice(7).toLowerCase(),
+          file:asset.name, patch:asset.name===patchName };
         update({phase:'available',version:next.tag_name.replace(/^v/,''),title:String(next.name || next.tag_name).slice(0,150),
           notes:String(next.body || '').slice(0,25000),progress:null,error:null});
       } catch (error) {
@@ -126,7 +129,7 @@ export function createUpdater({ repository, privateRepo, currentVersion, cache, 
     downloadJob = (async () => {
       update({phase:'downloading',progress:0,error:null});
       const folder = join(cache,`v${version}`);
-      const target = join(folder,releaseAsset);
+      const target = join(folder,asset.file);
       const temporary = target + '.part';
       const controller = new AbortController();
       let timer;
@@ -159,7 +162,7 @@ export function createUpdater({ repository, privateRepo, currentVersion, cache, 
           throw new Error('The installer failed its GitHub SHA-256 verification.');
         }
         await rename(temporary,target);
-        installer = { path:target, digest:asset.digest, version };
+        installer = { path:target, digest:asset.digest, version, patch:asset.patch };
         update({phase:'downloaded',progress:100,error:null});
       } catch (error) {
         await rm(temporary,{force:true}).catch(()=>{});

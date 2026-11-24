@@ -38,7 +38,7 @@ $appFiles = @('activity.mjs','desktop.mjs','editor.js','framecut.ico','graphics.
     'update-config.json','updater.mjs','updates-ui.mjs','workspace.css')
 foreach($file in $appFiles) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $app }
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
-& (Join-Path $framework 'csc.exe') /nologo /target:winexe /platform:anycpu "/out:$app\UpdateHelper.exe" "/reference:$framework\System.Web.Extensions.dll" (Join-Path $PSScriptRoot 'UpdateHelper.cs')
+& (Join-Path $framework 'csc.exe') /nologo /target:winexe /platform:anycpu "/out:$app\UpdateHelper.exe" "/reference:$framework\System.Web.Extensions.dll" '/reference:System.IO.Compression.dll' '/reference:System.IO.Compression.FileSystem.dll' (Join-Path $PSScriptRoot 'UpdateHelper.cs')
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 foreach($file in 'whisper-cli.exe','whisper.dll','ggml.dll','ggml-base.dll','ggml-cpu.dll') {
     Copy-Item -LiteralPath (Join-Path $whisperExtract "Release\$file") -Destination $speech
@@ -58,6 +58,10 @@ $runtimeEntries = foreach($file in $runtimeFiles) {
     'Source: "{0}"; DestDir: "{{app}}\{1}"; Flags: ignoreversion; Check: RuntimeChanged(''{2}'', ''{3}'')' -f $file.FullName,$folder,$relative,$digest
 }
 $runtimeEntries | Set-Content -LiteralPath (Join-Path $stage 'runtime-files.iss') -Encoding utf8NoBOM
+if ($manifest.runtimeId -notmatch '^[a-zA-Z0-9.-]+$') { throw 'Define the pinned runtime ID in package.json.' }
+$patch = Join-Path $dist "Framecut-App-$($manifest.runtimeId).zip"
+$appPatch = Get-ChildItem -LiteralPath $app -File | Select-Object -ExpandProperty FullName
+Compress-Archive -LiteralPath $appPatch -DestinationPath $patch -Force
 
 if(!$Compiler) {
     $Compiler = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source

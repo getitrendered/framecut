@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
@@ -12,6 +14,7 @@ namespace FramecutRelease
         public string path { get; set; }
         public string digest { get; set; }
         public string version { get; set; }
+        public bool patch { get; set; }
     }
 
     public sealed class UpdateJob
@@ -47,7 +50,8 @@ namespace FramecutRelease
             {
                 WaitForEditor(job.pid);
                 VerifyInstaller(job.installer);
-                Install(job);
+                if (job.installer.patch) ApplyAppPackage(job, json);
+                else Install(job);
                 applied = true;
             }
             catch (Exception failure) { error = failure.Message; }
@@ -110,6 +114,59 @@ namespace FramecutRelease
                 setup.WaitForExit();
                 if (setup.ExitCode != 0) throw new IOException("Windows setup exited with code " + setup.ExitCode + ".");
             }
+        }
+
+        private static void ApplyAppPackage(UpdateJob job, JavaScriptSerializer json)
+        {
+            var app = Path.Combine(Path.GetDirectoryName(job.executable), "resources", "app");
+            var staging = Path.Combine(app, ".update-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(staging);
+            var updated = new List<string>();
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using (var zip = ZipFile.OpenRead(job.installer.path))
+                {
+                    long bytes = 0;
+                    foreach (var entry in zip.Entries)
+                    {
+                        var name = entry.FullName;
+                        if (name != Path.GetFileName(name) || name.IndexOf(':') >= 0 ||
+                            !System.Text.RegularExpressions.Regex.IsMatch(name, @"^[A-Za-z0-9-]+\.(?:js|mjs|cjs|json|html|css|ico|py|exe)$") ||
+                            !names.Add(name) || names.Count > 60)
+                            throw new IOException("The update package contains an unexpected file.");
+                        bytes += entry.Length;
+                        if (bytes > 20_000_000) throw new IOException("The update package is too large.");
+                        entry.ExtractToFile(Path.Combine(staging, name));
+                    }
+                }
+                if (!names.Contains("package.json") || !names.Contains("desktop.mjs") || !names.Contains("UpdateHelper.exe"))
+                    throw new IOException("The update package is missing required files.");
+                var manifest = json.Deserialize<Dictionary<string, object>>(File.ReadAllText(Path.Combine(staging, "package.json")));
+                if (!manifest.ContainsKey("version") || (string)manifest["version"] != job.installer.version)
+                    throw new IOException("The downloaded app version does not match the release.");
+                foreach (var name in names)
+                {
+                    var path = Path.Combine(app, name);
+                    var next = Path.Combine(staging, name);
+                    if (File.Exists(path)) File.Replace(next, path, next + ".backup");
+                    else File.Move(next, path);
+                    updated.Add(name);
+                }
+            }
+            catch
+            {
+                for (var index = updated.Count - 1; index >= 0; index--)
+                {
+                    var name = updated[index];
+                    var target = Path.Combine(app, name);
+                    var backup = Path.Combine(staging, name) + ".backup";
+                    if (File.Exists(backup)) File.Replace(backup, target, null);
+                    else File.Delete(target);
+                }
+                throw;
+            }
+            finally { try { Directory.Delete(staging, true); } catch { } }
         }
 
         private static string Quote(string value)

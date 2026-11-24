@@ -119,6 +119,7 @@ async function start() {
 
 async function configureUpdates() {
   const config=JSON.parse(await readFile(new URL('./update-config.json',import.meta.url),'utf8'));
+  const manifest=JSON.parse(await readFile(new URL('./package.json',import.meta.url),'utf8'));
   const profile=app.getPath('userData');
   const cache=join(profile,'Updates');
   const statusFile=join(cache,'update-result.json');
@@ -126,7 +127,7 @@ async function configureUpdates() {
   const previous=await readFile(statusFile,'utf8')
     .then(raw=>JSON.parse(raw.replace(/^\uFEFF/,''))).catch(()=>null);
   const updater=createUpdater({
-    repository:config.repository, privateRepo:config.private, currentVersion:app.getVersion(), cache,
+    repository:config.repository, privateRepo:config.private, currentVersion:app.getVersion(), runtimeId:manifest.runtimeId, cache,
     broadcast(state){
       if(window && !window.isDestroyed()) window.webContents.send('framecut:update-state',{...state,previous});
     }
