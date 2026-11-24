@@ -25,6 +25,8 @@ const desktopToken = process.env.FRAMECUT_DESKTOP_TOKEN;
 const ffmpeg = process.env.FRAMECUT_FFMPEG || 'ffmpeg';
 const ffprobe = process.env.FRAMECUT_FFPROBE || 'ffprobe';
 const fps = 30;
+const renderInputLimit = 24;
+const audioLimiter = 'alimiter=limit=0.96:level=0:latency=1';
 const assets = new Map();
 const exports = new Map();
 const workers = new Set();
@@ -82,7 +84,12 @@ function run(command, args, options = {}) {
       if(options.stderrProgress) options.stderrProgress(chunk);
       errors = (errors + chunk).slice(-8000);
     });
-    child.on('error', reject);
+    child.on('error', error => {
+      workers.delete(child);
+      reject(error.code === 'ENAMETOOLONG'
+        ? new Error('Windows could not start the media encoder. Try exporting a shorter In/Out range or reducing overlapping tracks.')
+        : error);
+    });
     child.on('close', code => {
       workers.delete(child);
       if (code === 0) resolve(options.binary ? Buffer.concat(chunks) : output);
@@ -475,7 +482,7 @@ function readAudio(project) {
   });
 }
 
-function audioFilter(args,filter,timeline,dialogueOnly=false,reuse=false) {
+function audioFilter(args,filter,timeline,{dialogueOnly=false,reuse=false,batch=false,limit=true}={}) {
   const { clips, overlays, sounds, total } = timeline;
   let position=0;
   const sources=clips.map((clip,index)=>{
@@ -492,22 +499,24 @@ function audioFilter(args,filter,timeline,dialogueOnly=false,reuse=false) {
     const input=clip.input ?? offset++;
     const label='snd'+input;
     const gain=mix.gain;
-    const fadeIn=frame(clip.fadeIn) ? Math.min(clip.len,clip.fadeIn)*1600 : 0;
-    const fadeOut=frame(clip.fadeOut) ? Math.min(clip.len,clip.fadeOut)*1600 : 0;
-    const end=clip.len*1600;
-    if(clip.input===undefined) args.push('-ss',(clip.in/fps).toFixed(6),'-i',join(assetRoot,clip.asset.id,'source'));
+    const sourceLength=clip.sourceLength ?? clip.len;
+    const skip=(clip.sectionOffset ?? 0)*1600;
+    const fadeIn=frame(clip.fadeIn) ? Math.min(sourceLength,clip.fadeIn)*1600 : 0;
+    const fadeOut=frame(clip.fadeOut) ? Math.min(sourceLength,clip.fadeOut)*1600 : 0;
+    const end=skip+clip.len*1600;
+    if(clip.input===undefined) addRenderInput(args,clip,batch);
     const effects=[`[${input}:${clip.asset.audio}]aresample=48000:async=1:first_pts=0`,
       'aformat=sample_rates=48000:channel_layouts=stereo','apad',`atrim=end_sample=${end}`, 'asetpts=PTS-STARTPTS'];
     if(gain) effects.push(`volume=${gain}dB`);
     if(fadeIn) effects.push(`afade=t=in:ss=0:ns=${fadeIn}`);
-    if(fadeOut) effects.push(`afade=t=out:ss=${end-fadeOut}:ns=${fadeOut}`);
+    if(fadeOut) effects.push(`afade=t=out:ss=${sourceLength*1600-fadeOut}:ns=${fadeOut}`);
+    if(skip) effects.push(`atrim=start_sample=${skip}`,'asetpts=PTS-STARTPTS');
     effects.push(`adelay=${clip.start*1600}S:all=1[${label}]`);
     filter.push(effects.join(','));
     labels.push(label);
   }
   if(labels.length===1) filter.push('[soundbase]anull[audio]');
-  else filter.push(`${labels.map(label=>`[${label}]`).join('')}amix=inputs=${labels.length}:duration=first:normalize=0,alimiter=limit=0.96:level=0:latency=1,atrim=end_sample=${total*1600}[audio]`);
-  return labels.length > 1;
+  else filter.push(`${labels.map(label=>`[${label}]`).join('')}amix=inputs=${labels.length}:duration=first:normalize=0${limit?','+audioLimiter:''},atrim=end_sample=${total*1600}[audio]`);
 }
 
 async function transcribe(body) {
@@ -517,11 +526,7 @@ async function transcribe(body) {
   const folder=join(data,'renders','captions-'+randomUUID());
   await mkdir(folder);
   try {
-    const args=['-nostdin','-v','error','-filter_complex_threads','2'];
-    const filter=[];
-    if(!audioFilter(args,filter,timeline,true)) throw new Error('Add or unmute dialogue before generating captions.');
-    await writeFile(join(folder,'audio.ffscript'),filter.join(';\n'));
-    await runTimed([...args,'-/filter_complex','audio.ffscript','-map','[audio]','-ac','1','-ar','16000','-c:a','pcm_s16le','speech.wav'],{cwd:folder},'Mixing dialogue',timeline.total/fps);
+    await prepareDialogue(folder,timeline);
     const language=['en','hi','fr','de','es','it','pt','ja','ko','zh','ru','ar','ta','te','bn','ml','ur'].includes(body.language) ? body.language : 'auto';
     const seconds=await audibleEnd(join(folder,'speech.wav'));
     if(seconds===0) return {srt:'',endFrame:0};
@@ -535,6 +540,30 @@ async function transcribe(body) {
   } finally {
     await rm(folder,{recursive:true,force:true});
   }
+}
+
+async function prepareDialogue(folder,timeline) {
+  const inputs = [...timeline.clips,...timeline.overlays,...timeline.sounds.filter(clip=>clip.dialogue)]
+    .filter(clip=>clip.asset.audio!==null && !clipMix(timeline,clip).muted && clip.start<timeline.total);
+  if (!inputs.length) throw new Error('Add or unmute dialogue before generating captions.');
+  const speech = ['-ac','1','-ar','16000','-c:a','pcm_s16le','speech.wav'];
+  const mix = async (part, output, batch) => {
+    const args = ['-nostdin','-v','error','-filter_complex_threads','2'];
+    const filter = [];
+    audioFilter(args,filter,part,{dialogueOnly:true,batch,limit:!batch});
+    await writeFile(join(folder,'audio.ffscript'),filter.join(';\n'));
+    await runTimed([...args,'-/filter_complex','audio.ffscript','-map','[audio]',...output],{cwd:folder},'Mixing dialogue',part.total/fps);
+  };
+  if (inputs.length<=renderInputLimit) {
+    // Trim the input list even if dialogue occupies only a short fixed-duration edit.
+    const part = timelineSection(timeline,{start:0,end:timeline.total});
+    await mix(part,speech,false);
+    return;
+  }
+  const sections = divideTimeline(inputs,0,timeline.total);
+  await withRenderSections(folder,sections,'wav', (file,section)=>mix(timelineSection(timeline,section),
+    ['-c:a','pcm_f32le',file],true), list=>runTimed(['-nostdin','-v','error','-f','concat','-i',list,
+    '-af','asetpts=N/SR/TB,'+audioLimiter,...speech],{cwd:folder},'Joining dialogue',timeline.total/fps));
 }
 
 async function audibleEnd(path) {
@@ -658,148 +687,104 @@ function readTimeline(project) {
     trackSettings:project.trackSettings,masterMuted:project.masterMuted,masterGainDb:project.masterGainDb };
 }
 
+function divideTimeline(inputs, start, end) {
+  const relevant = inputs.filter(clip=>clip.start<end && clip.start+clip.len>start)
+    .sort((a,b)=>a.start-b.start);
+  const sections = [];
+  let sectionInputs = [];
+  for (const clip of relevant) {
+    if (clip.start>start && sectionInputs.length>=renderInputLimit) {
+      sections.push({start,end:clip.start});
+      start = clip.start;
+      sectionInputs = sectionInputs.filter(item=>item.start+item.len>start);
+    }
+    sectionInputs.push(clip);
+  }
+  sections.push({start,end});
+  return sections;
+}
+
+function timelineSection(timeline, {start,end}) {
+  const captions = timeline.titles.filter(title=>title.style==='caption').sort((a,b)=>a.start-b.start);
+  const visible = new Map(captions.map((title,i)=>[title,Math.min(title.len,(captions[i+1]?.start ?? Infinity)-title.start)]));
+  function slice(items) {
+    const clips = [];
+    for (const item of items) {
+      const first = Math.max(start,item.start);
+      const last = Math.min(end,item.start+(visible.get(item) ?? item.len));
+      if (first>=last) continue;
+      clips.push({...item,start:first-start,len:last-first,sectionOffset:first-item.start,sourceLength:item.len});
+    }
+    return clips;
+  }
+  const clips = slice(timeline.clips);
+  return {
+    ...timeline, clips, overlays:slice(timeline.overlays), titles:slice(timeline.titles), sounds:slice(timeline.sounds),
+    videoFrames:Math.max(0,...clips.map(clip=>clip.start+clip.len)), total:end-start
+  };
+}
+
+function addRenderInput(args, clip, batch) {
+  if (batch) args.push('-threads','1');
+  args.push('-ss',(clip.in/fps).toFixed(6),'-i',`../../media/${clip.asset.id}/source`);
+}
+
+async function withRenderSections(folder, sections, ext, prepare, merge) {
+  const list = 'sections.ffconcat';
+  const files = [];
+  try {
+    const manifest = ['ffconcat version 1.0'];
+    let elapsed = 0;
+    for (const [index,section] of sections.entries()) {
+      const file = `section-${index}.${ext}`;
+      files.push(file);
+      await prepare(file,section);
+      const end = Math.round((section.end-sections[0].start)*1e6/fps);
+      manifest.push('file '+file,'duration '+((end-elapsed)/1e6).toFixed(6));
+      elapsed = end;
+    }
+    await writeFile(join(folder,list),manifest.join('\n')+'\n');
+    await merge(list);
+  } finally {
+    await Promise.all([...files,list].map(file=>rm(join(folder,file),{force:true}).catch(()=>{})));
+  }
+}
+
 async function render(job, project, timeline) {
   const folder = join(data, 'renders', job.id);
   try {
     await mkdir(folder);
-    const { clips, overlays, videoFrames, total } = timeline;
-    const titles=timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
-    const [outputWidth, outputHeight] = sequenceSize(project);
-    const odd = (outputWidth % 2 || outputHeight % 2) !== 0;
-    const width = outputWidth + outputWidth % 2;
-    const height = outputHeight + outputHeight % 2;
-    const range = exportRange(project, total);
+    const range = exportRange(project,timeline.total);
     if (!range.frames) throw new Error('The export Out point must follow the In point.');
-    const filter = [];
-    const args = ['-nostdin', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-filter_complex_threads', '2'];
-    const segments=[];
-    let previous=0;
-    const gap=(frames)=>{
-      const label='gap'+segments.length;
-      filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${frames}[${label}]`);
-      segments.push(label);
-    };
-    for (const [i, clip] of clips.entries()) {
-      if(clip.start>previous) gap(clip.start-previous);
-      args.push('-ss', (clip.in / fps).toFixed(6), '-i', `../../media/${clip.asset.id}/source`);
-      const effects = Object.keys(properties).some(key => changed(clip,key));
-      videoStream(filter, clip, i, width,height, effects, `vs${i}`);
-      if (effects) {
-        filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${clip.len}[black${i}]`);
-        composite(filter, `black${i}`, `vs${i}`, clip, 0, `v${i}`, width, height);
-      } else {
-        filter.push(`[vs${i}]null[v${i}]`);
-      }
-      segments.push(`v${i}`);
-      previous=clip.start+clip.len;
-    }
-    if(total>videoFrames) gap(total-videoFrames);
-    filter.push(`${segments.map(label=>`[${label}]`).join('')}concat=n=${segments.length}:v=1:a=0[vbase]`);
-    let video = 'vbase';
-    for (const [index, clip] of overlays.entries()) {
-      const input = clips.length + index;
-      args.push('-ss',(clip.in/fps).toFixed(6),'-i',`../../media/${clip.asset.id}/source`);
-      videoStream(filter,clip,input,width,height,true,`layer${index}`);
-      filter.push(`[layer${index}]setpts=PTS+${clip.start}/(${fps}*TB)[layerdelay${index}]`);
-      composite(filter,video,`layerdelay${index}`,clip,clip.start,`layered${index}`,width,height);
-      video = `layered${index}`;
-    }
-    audioFilter(args,filter,timeline,false,true);
-    const fonts=new Set();
-    const captions=titles.filter(title=>title.style==='caption').sort((a,b)=>a.start-b.start);
-    const captionSegments=[];
-    let captionEnd=0;
-    const captionGap=(frames)=>{
-      const label='captgap'+captionSegments.length;
-      filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${frames}[${label}]`);
-      captionSegments.push(label);
-    };
-    for (const [i, title] of titles.entries()) {
-      const caption=title.style==='caption';
-      const next=caption ? captions[captions.indexOf(title)+1] : null;
-      const visibleLength=next ? Math.min(title.len,next.start-title.start):title.len;
-      if(visibleLength<=0) continue;
-      const type=titleType(title);
-      const font=fontFamilies[type.family][type.weight];
-      if(!fonts.has(font)){
-        const system=join(process.env.WINDIR || 'C:/Windows','Fonts');
-        await writeFile(join(folder,font),await readFile(join(system,font)).catch(()=>readFile(join(system,'segoeuib.ttf'))));
-        fonts.add(font);
-      }
-      const size=height*type.size/100;
-      const units=height/1080;
-      const maxColumns=Math.max(12,Math.floor(width*.84/(size*(.56+type.tracking*.08))));
-      const wrapped=wrapText(title.text,maxColumns);
-      const chars = [...wrapped];
-      const count = title.typewriter ? Math.min(chars.length, 24) : 1;
-      const step = Math.max(1, Math.ceil(title.len * .65 / count));
-      const longest=Math.max(1,...wrapped.split('\n').map(row=>[...row].length));
-      const fontSize=Math.max(8,Math.round(Math.min(size,width*.86/(longest*(.56+type.tracking*.08)))));
-      const x=type.align==='left' ? 'w*0.075' : type.align==='right' ? 'w*0.925-tw' : '(w-tw)/2';
-      const y=title.style==='caption' ? 'h*0.91-th' : title.style==='lower' ? 'h*0.87-th' : '(h-th)/2';
-      const draw=[], shadow=[];
-      const color=(hex,alpha=100)=>`0x${hex.slice(1)}@${(alpha/100).toFixed(3)}`;
-      for (let part = 0; part < count && part * step < title.len; part++) {
-        const file = `title-${i}-${part}.txt`;
-        await writeFile(join(folder,file),typographyText(chars.slice(0,Math.ceil((part + 1)*chars.length/count)).join(''),type));
-        const limit = part + 1 === count ? title.len : (part + 1) * step;
-        const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}:enable='gte(n,${part*step})*lt(n,${limit})'`;
-        if(type.shadow) shadow.push(`${base}:fontcolor=black@${type.shadow/100}:x=(${x})+(${Math.round(type.shadowX*units)}):y=(${y})+(${Math.round(type.shadowY*units)})`);
-        const box=type.boxOpacity ? `:box=1:boxcolor=${color(type.background,type.boxOpacity)}:boxborderw=${Math.round(type.padding*units)}` : '';
-        if(box && type.depth) draw.push(`${base}:fontcolor=white@0:x=${x}:y=${y}${box}`);
-        for(let depth=type.depth;depth>0;depth--) {
-          const offset=Math.max(1,Math.round(depth*units));
-          draw.push(`${base}:fontcolor=${color(type.depthColor)}:x=(${x})+${offset}:y=(${y})+${offset}`);
-        }
-        draw.push(`${base}:fontcolor=${color(type.fill)}:borderw=${Math.round(type.outline*units)}:bordercolor=${color(type.outlineColor)}:x=${x}:y=${y}${type.depth ? '' : box}`);
-      }
-      if(shadow.length && type.blur) shadow.push(`gblur=sigma=${Math.max(.1,type.blur*units)}:planes=8`);
-      const chain=[...shadow,...draw,...motionFilters(title),`setpts=PTS+${caption?0:title.start}/(${fps}*TB)`];
-      filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength},${chain.join(',')}[title${i}]`);
-      if (!caption) {
-        composite(filter,video,`title${i}`,title,title.start,`titled${i}`,width,height);
-        video = `titled${i}`;
-      } else {
-        if(title.start>captionEnd) captionGap(title.start-captionEnd);
-        if(['x','y','scale'].some(key=>changed(title,key))) {
-          filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength}[captbase${i}]`);
-          composite(filter,`captbase${i}`,`title${i}`,{...title,len:visibleLength},0,`caption${i}`,width,height,true);
-          captionSegments.push(`caption${i}`);
-        } else captionSegments.push(`title${i}`);
-        captionEnd=title.start+visibleLength;
-      }
-    }
-    if(captionSegments.length) {
-      filter.push(`${captionSegments.map(label=>`[${label}]`).join('')}concat=n=${captionSegments.length}:v=1:a=0[captions]`);
-      composite(filter,video,'captions',{len:captionEnd},0,'withcaptions',width,height);
-      video='withcaptions';
-    }
-    const pixelFormat = odd ? 'yuv444p' : 'yuv420p';
-    const crop = odd ? `,format=${pixelFormat},crop=${outputWidth}:${outputHeight}:0:0:exact=1` : '';
-    filter.push(`[${video}]trim=start_frame=${range.start}:end_frame=${range.end},setpts=PTS-STARTPTS${crop}[picture]`);
-    filter.push(`[audio]atrim=start_sample=${range.start * 1600}:end_sample=${range.end * 1600},asetpts=PTS-STARTPTS[sound]`);
-    await writeFile(join(folder, 'graph.ffscript'), filter.join(';\n'));
-    let buffered = '';
     const quality = { high:[17,24,'224k'], balanced:[22,31,'160k'], small:[29,40,'96k'] };
     const [h264, vp9, bitrate] = Object.hasOwn(quality,project.quality) ? quality[project.quality] : quality.high;
-    const encoding = job.format === 'webm'
-      ? ['-c:v','libvpx-vp9','-deadline','good','-cpu-used','5','-b:v','0','-crf',String(vp9),'-c:a','libopus','-b:a',bitrate]
-      : ['-c:v','libx264','-preset','veryfast','-crf',String(h264),'-c:a','aac','-b:a',bitrate,'-movflags','+faststart'];
-    await run(ffmpeg, [
-      ...args, '-/filter_complex', 'graph.ffscript',
-      '-map', '[picture]', '-map', '[sound]',
-      ...encoding,'-pix_fmt',pixelFormat,`video.${job.format}`
-    ], { cwd: folder, progress(chunk) {
-      const lines = (buffered + chunk).split('\n');
-      buffered = lines.pop();
-      for (const line of lines) {
-        const match = line.match(/^frame=\s*(\d+)/);
-        if (match) {
-          job.progress = Math.min(99, Math.round(Number(match[1]) / range.frames * 100));
-          taskStage(job.composition ? 'Rendering composition' : 'Rendering video',job.progress);
-        }
-      }
-    } });
+    const webm = job.format==='webm';
+    const videoEncoding = webm ? ['-c:v','libvpx-vp9','-deadline','good','-cpu-used','5','-b:v','0','-crf',String(vp9)]
+      : ['-c:v','libx264','-preset','veryfast','-crf',String(h264)];
+    const audioEncoding = ['-c:a',webm?'libopus':'aac','-b:a',bitrate];
+    const muxOptions = webm ? [] : ['-movflags','+faststart'];
+    const output = `video.${job.format}`;
+    const inputs = [...timeline.clips,...timeline.overlays,...timeline.sounds];
+    const stage = job.composition ? 'Rendering composition' : 'Rendering video';
+    const report = (done, ceiling) => {
+      job.progress = Math.min(ceiling,Math.round(done/range.frames*ceiling));
+      taskStage(stage,job.progress);
+    };
+    if (inputs.length<=renderInputLimit) {
+      await renderSection(folder,project,timeline,range,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99));
+    } else {
+      const sections = divideTimeline(inputs,range.start,range.end);
+      await withRenderSections(folder,sections,'nut',async(file,section)=>{
+        const part = timelineSection(timeline,section);
+        await renderSection(folder,project,part,{start:0,end:part.total,frames:part.total},file,
+          [...videoEncoding,'-c:a','pcm_f32le'],true,frame=>report(section.start-range.start+frame,95));
+      },async list=>{
+        job.progress = 96;
+        await runTimed(['-nostdin','-v','error','-f','concat','-i',list,'-map','0:v:0','-map','0:a:0','-c:v','copy',
+          '-af','asetpts=N/SR/TB,'+audioLimiter,...audioEncoding,...muxOptions,output],
+          {cwd:folder},'Joining rendered sections',range.frames/fps);
+      });
+    }
     job.progress = 100;
     if (!job.composition) job.status = 'ready';
   } catch (error) {
@@ -808,11 +793,146 @@ async function render(job, project, timeline) {
   }
 }
 
+async function renderSection(folder, project, timeline, range, output, encoding, batch, onFrame) {
+  const { clips, overlays, videoFrames, total } = timeline;
+  const titles=timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
+  const [outputWidth, outputHeight] = sequenceSize(project);
+  const odd = (outputWidth % 2 || outputHeight % 2) !== 0;
+  const width = outputWidth + outputWidth % 2;
+  const height = outputHeight + outputHeight % 2;
+  const filter = [];
+  const args = ['-nostdin', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-filter_complex_threads', '2'];
+  const segments=[];
+  let previous=0;
+  const gap=(frames)=>{
+    const label='gap'+segments.length;
+    filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${frames}[${label}]`);
+    segments.push(label);
+  };
+  for (const [i, clip] of clips.entries()) {
+    if(clip.start>previous) gap(clip.start-previous);
+    addRenderInput(args,clip,batch);
+    const effects = Object.keys(properties).some(key => changed(clip,key));
+    videoStream(filter, clip, i, width,height, effects, `vs${i}`);
+    if (effects) {
+      filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${clip.len}[black${i}]`);
+      composite(filter, `black${i}`, `vs${i}`, clip, 0, `v${i}`, width, height);
+    } else {
+      filter.push(`[vs${i}]null[v${i}]`);
+    }
+    segments.push(`v${i}`);
+    previous=clip.start+clip.len;
+  }
+  if(total>videoFrames) gap(total-videoFrames);
+  // A one-frame segment can leave the concat filter with a zero-length timestamp span.
+  const frameClock = `settb=1/${fps},setpts=N`;
+  filter.push(`${segments.map(label=>`[${label}]`).join('')}concat=n=${segments.length}:v=1:a=0,${frameClock}[vbase]`);
+  let video = 'vbase';
+  for (const [index, clip] of overlays.entries()) {
+    const input = clips.length + index;
+    addRenderInput(args,clip,batch);
+    videoStream(filter,clip,input,width,height,true,`layer${index}`);
+    filter.push(`[layer${index}]setpts=PTS+${clip.start}/(${fps}*TB)[layerdelay${index}]`);
+    composite(filter,video,`layerdelay${index}`,clip,clip.start,`layered${index}`,width,height);
+    video = `layered${index}`;
+  }
+  audioFilter(args,filter,timeline,{reuse:true,batch,limit:!batch});
+  const fonts=new Set();
+  const captions=titles.filter(title=>title.style==='caption').sort((a,b)=>a.start-b.start);
+  const captionSegments=[];
+  let captionEnd=0;
+  const captionGap=(frames)=>{
+    const label='captgap'+captionSegments.length;
+    filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${frames}[${label}]`);
+    captionSegments.push(label);
+  };
+  for (const [i, title] of titles.entries()) {
+    const caption=title.style==='caption';
+    const next=caption ? captions[captions.indexOf(title)+1] : null;
+    const visibleLength=next ? Math.min(title.len,next.start-title.start):title.len;
+    if(visibleLength<=0) continue;
+    const type=titleType(title);
+    const font=fontFamilies[type.family][type.weight];
+    if(!fonts.has(font)){
+      const system=join(process.env.WINDIR || 'C:/Windows','Fonts');
+      await writeFile(join(folder,font),await readFile(join(system,font)).catch(()=>readFile(join(system,'segoeuib.ttf'))));
+      fonts.add(font);
+    }
+    const size=height*type.size/100;
+    const units=height/1080;
+    const maxColumns=Math.max(12,Math.floor(width*.84/(size*(.56+type.tracking*.08))));
+    const wrapped=wrapText(title.text,maxColumns);
+    const chars = [...wrapped];
+    const count = title.typewriter ? Math.min(chars.length, 24) : 1;
+    const sourceLength = title.sourceLength ?? title.len;
+    const localFrame = title.sectionOffset ? `(n+${title.sectionOffset})` : 'n';
+    const step = Math.max(1, Math.ceil(sourceLength * .65 / count));
+    const longest=Math.max(1,...wrapped.split('\n').map(row=>[...row].length));
+    const fontSize=Math.max(8,Math.round(Math.min(size,width*.86/(longest*(.56+type.tracking*.08)))));
+    const x=type.align==='left' ? 'w*0.075' : type.align==='right' ? 'w*0.925-tw' : '(w-tw)/2';
+    const y=title.style==='caption' ? 'h*0.91-th' : title.style==='lower' ? 'h*0.87-th' : '(h-th)/2';
+    const draw=[], shadow=[];
+    const color=(hex,alpha=100)=>`0x${hex.slice(1)}@${(alpha/100).toFixed(3)}`;
+    for (let part = 0; part < count && part * step < sourceLength; part++) {
+      const file = `title-${i}-${part}.txt`;
+      await writeFile(join(folder,file),typographyText(chars.slice(0,Math.ceil((part + 1)*chars.length/count)).join(''),type));
+      const limit = part + 1 === count ? sourceLength : (part + 1) * step;
+      const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}:enable='gte(${localFrame},${part*step})*lt(${localFrame},${limit})'`;
+      if(type.shadow) shadow.push(`${base}:fontcolor=black@${type.shadow/100}:x=(${x})+(${Math.round(type.shadowX*units)}):y=(${y})+(${Math.round(type.shadowY*units)})`);
+      const box=type.boxOpacity ? `:box=1:boxcolor=${color(type.background,type.boxOpacity)}:boxborderw=${Math.round(type.padding*units)}` : '';
+      if(box && type.depth) draw.push(`${base}:fontcolor=white@0:x=${x}:y=${y}${box}`);
+      for(let depth=type.depth;depth>0;depth--) {
+        const offset=Math.max(1,Math.round(depth*units));
+        draw.push(`${base}:fontcolor=${color(type.depthColor)}:x=(${x})+${offset}:y=(${y})+${offset}`);
+      }
+      draw.push(`${base}:fontcolor=${color(type.fill)}:borderw=${Math.round(type.outline*units)}:bordercolor=${color(type.outlineColor)}:x=${x}:y=${y}${type.depth ? '' : box}`);
+    }
+    if(shadow.length && type.blur) shadow.push(`gblur=sigma=${Math.max(.1,type.blur*units)}:planes=8`);
+    const chain=[...shadow,...draw,...motionFilters(title),`setpts=PTS+${caption?0:title.start}/(${fps}*TB)`];
+    filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength},${chain.join(',')}[title${i}]`);
+    if (!caption) {
+      composite(filter,video,`title${i}`,title,title.start,`titled${i}`,width,height);
+      video = `titled${i}`;
+    } else {
+      if(title.start>captionEnd) captionGap(title.start-captionEnd);
+      if(['x','y','scale'].some(key=>changed(title,key))) {
+        filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength}[captbase${i}]`);
+        composite(filter,`captbase${i}`,`title${i}`,{...title,len:visibleLength},0,`caption${i}`,width,height,true);
+        captionSegments.push(`caption${i}`);
+      } else captionSegments.push(`title${i}`);
+      captionEnd=title.start+visibleLength;
+    }
+  }
+  if(captionSegments.length) {
+    filter.push(`${captionSegments.map(label=>`[${label}]`).join('')}concat=n=${captionSegments.length}:v=1:a=0,${frameClock}[captions]`);
+    composite(filter,video,'captions',{len:captionEnd},0,'withcaptions',width,height);
+    video='withcaptions';
+  }
+  const pixelFormat = odd ? 'yuv444p' : 'yuv420p';
+  const crop = odd ? `,format=${pixelFormat},crop=${outputWidth}:${outputHeight}:0:0:exact=1` : '';
+  filter.push(`[${video}]trim=start_frame=${range.start}:end_frame=${range.end},setpts=PTS-STARTPTS${crop}[picture]`);
+  filter.push(`[audio]atrim=start_sample=${range.start * 1600}:end_sample=${range.end * 1600},asetpts=PTS-STARTPTS[sound]`);
+  await writeFile(join(folder, 'graph.ffscript'), filter.join(';\n'));
+  let buffered = '';
+  await run(ffmpeg, [
+    ...args, '-/filter_complex', 'graph.ffscript',
+    '-map', '[picture]', '-map', '[sound]',
+    ...encoding,'-pix_fmt',pixelFormat,output
+  ], { cwd: folder, progress(chunk) {
+    const lines = (buffered + chunk).split('\n');
+    buffered = lines.pop();
+    for (const line of lines) {
+      const match = line.match(/^frame=\s*(\d+)/);
+      if (match) onFrame(Number(match[1]));
+    }
+  } });
+}
+
 function changed(clip,key) { return points(clip,key).some(([,value]) => value !== properties[key][3]); }
 
 function motionFilters(clip) {
   const result = [];
-  const at = (key, frame = 'N') => expression(clip,key,frame);
+  const at = (key, frame = 'N') => expression(clip,key,clip.sectionOffset ? `(${frame}+${clip.sectionOffset})` : frame);
   if (changed(clip,'brightness') || changed(clip,'contrast') || changed(clip,'saturation')) {
     result.push(`eq=brightness='(${at('brightness','n')}-100)/180':contrast='(${at('contrast','n')})/100':saturation='(${at('saturation','n')})/100':eval=frame`);
   }
@@ -833,15 +953,19 @@ function motionFilters(clip) {
 
 function videoStream(filter,clip,input,width,height,alpha,output) {
   const chain = ['setpts=PTS-STARTPTS',`fps=${fps}:round=up`];
+  const offset = clip.sectionOffset ?? 0;
+  const trim = [`tpad=stop_mode=clone:stop_duration=${((clip.sourceLength ?? clip.len)/fps).toFixed(6)}`,
+    `trim=start_frame=${offset}:end_frame=${offset+clip.len}`,'setpts=PTS-STARTPTS'];
+  if (offset) chain.push(...trim);
   if (clip.lut && luts.has(clip.lut)) chain.push(`lut3d=file=../../luts/${clip.lut}.cube`);
-  chain.push(`format=${alpha ? 'yuva420p' : 'yuv420p'}`,encodeSize(width,height,alpha),
-    `tpad=stop_mode=clone:stop_duration=${(clip.len/fps).toFixed(6)}`,`trim=end_frame=${clip.len}`,'setpts=PTS-STARTPTS');
+  chain.push(`format=${alpha ? 'yuva420p' : 'yuv420p'}`,encodeSize(width,height,alpha));
+  if (!offset) chain.push(...trim);
   if (alpha) chain.push(...motionFilters(clip));
   filter.push(`[${input}:${clip.asset.video}]${chain.join(',')}[${output}]`);
 }
 
 function composite(filter, base, layer, clip, start, target, width, height, alpha=false) {
-  const at = `max(0,round(t*${fps})-${start})`;
+  const at = `(max(0,round(t*${fps})-${start})+${clip.sectionOffset ?? 0})`;
   const x = `(main_w-overlay_w)/2+${width}*(${expression(clip,'x',at)})/100`;
   const y = `(main_h-overlay_h)/2+${height}*(${expression(clip,'y',at)})/100`;
   filter.push(`[${base}][${layer}]overlay=x='${x}':y='${y}':eof_action=pass:repeatlast=0${alpha?':format=auto':''}:enable='gte(t,${start/fps})*lt(t,${(start+clip.len)/fps})'[${target}]`);
