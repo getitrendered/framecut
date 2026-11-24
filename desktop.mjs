@@ -10,6 +10,7 @@ import { hasActiveTasks } from './activity.mjs';
 
 const editor = 'framecut://editor/';
 const icon = fileURLToPath(new URL('framecut.ico', import.meta.url));
+const appId = 'com.framecut.editor';
 let window;
 let backend;
 let checkTimer;
@@ -18,7 +19,7 @@ protocol.registerSchemesAsPrivileged([{
   scheme: 'framecut',
   privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true }
 }]);
-app.setAppUserModelId('com.framecut.editor');
+app.setAppUserModelId(appId);
 const profile = app.commandLine.getSwitchValue('user-data-dir');
 if (profile) {
   mkdirSync(profile, { recursive: true });
@@ -73,6 +74,14 @@ async function start() {
       preload: fileURLToPath(new URL('preload.cjs', import.meta.url))
     }
   });
+  if (process.platform === 'win32') {
+    window.setAppDetails({
+      appId,
+      appIconPath: icon,
+      relaunchCommand: `"${process.execPath}"`,
+      relaunchDisplayName: 'Framecut'
+    });
+  }
   window.webContents.setWindowOpenHandler(({ url }) => {
     const target = new URL(url);
     if (target.origin === 'https://www.dji.com' && target.pathname.startsWith('/downloads')) void shell.openExternal(url);

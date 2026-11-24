@@ -36,8 +36,8 @@ Source: "{#StageRoot}\resources\app\*"; DestDir: "{app}\resources\app"; Flags: i
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked; Check: StandardInstall
 
 [Icons]
-Name: "{group}\Framecut"; Filename: "{app}\Framecut.exe"; AppUserModelID: "com.framecut.editor"; Check: StandardInstall
-Name: "{userdesktop}\Framecut"; Filename: "{app}\Framecut.exe"; AppUserModelID: "com.framecut.editor"; Tasks: desktopicon; Check: StandardInstall
+Name: "{group}\Framecut"; Filename: "{app}\Framecut.exe"; IconFilename: "{app}\resources\app\framecut.ico"; AppUserModelID: "com.framecut.editor"; Check: StandardInstall
+Name: "{userdesktop}\Framecut"; Filename: "{app}\Framecut.exe"; IconFilename: "{app}\resources\app\framecut.ico"; AppUserModelID: "com.framecut.editor"; Tasks: desktopicon; Check: StandardInstall
 
 [Run]
 Filename: "{app}\Framecut.exe"; Description: "Open Framecut"; Flags: nowait postinstall skipifsilent
