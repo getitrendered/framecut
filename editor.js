@@ -117,6 +117,7 @@ const previewObserver=new IntersectionObserver(entries=>{
   }
 },{threshold:.2});
 const overlayPlayers = new Map();
+const compositionViews = new Map();
 
 const id = () => crypto.randomUUID();
 const clamp = (n, min, max) => Math.max(min, Math.min(n, max));
@@ -199,8 +200,12 @@ setupUpdates(()=>{
   return JSON.stringify({ ...project, catalog });
 });
 
+function hasPendingTask() {
+  return exporting || importing || transcribing || looping || pendingEdits || syncingCompositions;
+}
+
 function busySwitch() {
-  if (!(exporting || importing || transcribing || looping || pendingEdits || syncingCompositions)) return false;
+  if (!hasPendingTask()) return false;
   const message = 'Wait for the current task to finish before switching timelines.';
   if (page === 'projects') $('projects-status').textContent = message;
   else notify(message);
@@ -221,6 +226,7 @@ function activateSequence(key) {
   hideTimelineMenu();
   sequenceKey = key;
   project = next;
+  if (key==='main') refreshCompositionLinks();
   project.titleLayers = Math.max(project.titleLayers, ...project.titles.filter(clip=>clip.style!=='caption').map(clip=>clip.track||1));
   const view = sequenceViews.get(`${entry.id}:${key}`);
   cursor = view?.cursor ?? 0;
@@ -242,7 +248,6 @@ function activateSequence(key) {
   controls.renderSequences();
   switchPage('edit');
   setTimelineScroll(view?.left ?? 0);
-  if (key === 'main') void refreshMainCompositions().catch(error=>notify(error.message));
 }
 
 function openProject(key) {
@@ -305,6 +310,65 @@ function editSequence(values) {
   return true;
 }
 
+function deleteComposition(key) {
+  const item = entry?.compositions.find(composition=>composition.id===key);
+  if (!item) throw new Error('This composition is unavailable.');
+  if (hasPendingTask()) throw new Error('Wait for the current task to finish before deleting this composition.');
+  const withoutComposition = sequence => {
+    const clips = sequence.clips.filter(clip=>clip.composition!==key);
+    const overlays = sequence.overlays.filter(clip=>clip.composition!==key);
+    return clips.length===sequence.clips.length && overlays.length===sequence.overlays.length ? sequence : { ...sequence, clips, overlays };
+  };
+  const otherCompositions = entry.compositions.filter(composition=>composition!==item);
+  const sequences = [{ id:'main', sequence:entry.main },...otherCompositions];
+  const nextSequences = new Map();
+  for (const sequence of sequences) {
+    const next = withoutComposition(sequence.sequence);
+    if (next!==sequence.sequence && changesLockedClips(sequence.sequence,next)) {
+      const name = sequence.id==='main' ? 'Main' : sequence.sequence.name;
+      throw new Error(`Unlock the affected tracks on ${name} to delete this composition.`);
+    }
+    nextSequences.set(sequence.id,next);
+  }
+
+  const previousEntry = { ...entry };
+  const previousProject = project;
+  const previousKey = sequenceKey;
+  entry.main = nextSequences.get('main');
+  entry.compositions = otherCompositions.map(composition=>({ ...composition, sequence:nextSequences.get(composition.id) }));
+  if (entry.led?.walls?.some(wall=>wall.sequence===key)) {
+    entry.led = { ...entry.led, walls:entry.led.walls.map(wall=>wall.sequence===key ? { ...wall, sequence:null, asset:null } : wall) };
+  }
+  if (sequenceKey===key) sequenceKey = 'main';
+  project = nextSequences.get(sequenceKey);
+  if (!persist()) {
+    Object.assign(entry,previousEntry);
+    project = previousProject;
+    sequenceKey = previousKey;
+    throw new Error('Framecut could not save the project. The composition is still available.');
+  }
+
+  sequenceViews.delete(`${entry.id}:${key}`);
+  for (const { id } of sequences) {
+    const view = previousKey===id ? { undo, redo } : sequenceViews.get(`${entry.id}:${id}`);
+    if (view) for (const stack of [view.undo,view.redo]) {
+      stack.splice(0,stack.length,...stack.map(withoutComposition));
+    }
+  }
+  if (timelineClipboard?.clip?.composition===key) timelineClipboard = null;
+  if (timelineClipboard?.group) {
+    const group = timelineClipboard.group.filter(clip=>clip.composition!==key);
+    timelineClipboard = group.length ? { group } : null;
+  }
+  bin.delete(compositionAssetKey(key));
+  if (previousKey===key) activateSequence('main');
+  else {
+    controls.renderSequences();
+    renderTimeline();
+  }
+  notify(`Deleted ${item.sequence.name}`);
+}
+
 const controls = projectControls({
   entries:()=>catalog.projects,
   current:()=>({ entry, selected:sequenceKey }),
@@ -314,6 +378,7 @@ const controls = projectControls({
   edit:editSequence,
   openSequence,
   addComposition:key=>void placeComposition(key),
+  deleteComposition,
   timecode
 });
 
@@ -339,63 +404,73 @@ async function materialize(item, sequence = item.sequence) {
   return asset;
 }
 
-async function refreshMainCompositions() {
-  if (!entry || sequenceKey !== 'main') return;
-  const linked = [...new Set([...project.clips, ...project.overlays].map(clip=>clip.composition).filter(Boolean))];
-  if (!linked.length) return;
-  syncingCompositions++;
-  try {
-    for (const key of linked) {
-      const item = entry.compositions.find(composition=>composition.id===key);
-      if (!item) continue;
-      if (!sequenceDuration(item.sequence,contentDuration(item.sequence))) {
-        const empty = { ...item.sequence, fixedFrames:1 };
-        replaceCompositionAsset(key, await materialize(item,empty));
-      } else replaceCompositionAsset(key, await materialize(item));
-    }
-  } finally { syncingCompositions--; }
+const compositionAssetKey = key => `comp-${key}`;
+function registerComposition(item) {
+  const [width,height] = sequenceSize(item.sequence);
+  const asset = { id:compositionAssetKey(item.id), name:item.sequence.name, composition:true,
+    kind:'video', frames:Math.max(1,sequenceDuration(item.sequence,contentDuration(item.sequence))), width, height, audio:null };
+  bin.set(asset.id,asset);
+  return asset;
 }
 
-function replaceCompositionAsset(key, asset) {
-  let updated = false;
+function refreshCompositionLinks() {
+  const available = new Map(entry.compositions.map(item=>[item.id,registerComposition(item)]));
   for (const lane of [project.clips, ...Array.from({length:project.layers},(_,i)=>project.overlays.filter(clip=>clip.track===i+1))]) {
+    const nextStarts = new Map();
+    const ordered = [...lane].sort((a,b)=>a.start-b.start);
+    for (let i=ordered.length-1;i>=0;i--) {
+      const clip = ordered[i];
+      nextStarts.set(clip,clip.start===ordered[i+1]?.start ? nextStarts.get(ordered[i+1]) : ordered[i+1]?.start ?? Infinity);
+    }
     for (const clip of lane) {
-      if (clip.composition !== key || clip.asset === asset.id) continue;
+      const asset = available.get(clip.composition);
+      if (!asset) continue;
       const sourceLength = bin.get(clip.asset)?.frames;
       const previousLength = clip.len;
       const fullLength = clip.in === 0 && (clip.compositionFollow ?? previousLength === sourceLength);
-      const next = lane.filter(other=>other!==clip && other.start>clip.start).reduce((start,other)=>Math.min(start,other.start),Infinity);
+      const next = nextStarts.get(clip);
       clip.in = Math.min(clip.in,asset.frames-1);
       clip.len = Math.min(fullLength ? asset.frames : previousLength,asset.frames-clip.in,next-clip.start);
       clip.compositionFollow = fullLength;
       clip.asset = asset.id;
-      updated = true;
     }
-  }
-  if (updated) {
-    persist();
-    renderTimeline();
   }
 }
 
-async function placeComposition(key, at, track = 0) {
+async function resolveCompositionClips(sequence) {
+  const resolved = new Map();
+  const resolveLane = async clips => {
+    const lane = [];
+    for (const clip of clips) {
+      if (!isLiveComposition(clip)) { lane.push(clip); continue; }
+      const item = entry.compositions.find(composition=>composition.id===clip.composition);
+      if (!item) throw new Error('Remove the unavailable linked composition before rendering.');
+      if (!resolved.has(item.id)) {
+        const length = sequenceDuration(item.sequence,contentDuration(item.sequence));
+        const input = length ? item.sequence : { ...item.sequence, fixedFrames:1 };
+        resolved.set(item.id,await materialize(item,input));
+      }
+      const asset = resolved.get(item.id);
+      lane.push({ ...clip, asset:asset.id });
+    }
+    return lane;
+  };
+  return { ...sequence, clips:await resolveLane(sequence.clips), overlays:await resolveLane(sequence.overlays) };
+}
+
+function placeComposition(key, at, track = 0) {
   if (!entry || busySwitch()) return;
   const item = entry.compositions.find(composition=>composition.id===key);
   if (!item) return;
   if (sequenceKey !== 'main' && !openSequence('main')) return;
   if (!guardTrack(`video:${track}`)) return;
   const start = at ?? cursor;
-  syncingCompositions++;
-  notify(`Preparing ${item.sequence.name}…`);
-  try {
-    const asset = await materialize(item);
-    const clip = track ? insertOverlay(asset.id,track,start,false,key) : insertVideo(asset.id,project.clips.length,start,key);
-    if (clip) {
-      controls.drawer(false);
-      notify(`Added ${item.sequence.name} to Main`);
-    }
-  } catch (error) { notify(error.message); }
-  finally { syncingCompositions--; }
+  const asset = registerComposition(item);
+  const clip = track ? insertOverlay(asset.id,track,start,false,key) : insertVideo(asset.id,project.clips.length,start,key);
+  if (clip) {
+    controls.drawer(false);
+    notify(`Added ${item.sequence.name} to Main`);
+  }
 }
 
 const led = createLedWorkspace({
@@ -413,8 +488,7 @@ const led = createLedWorkspace({
     const item = key==='main' ? entry : entry.compositions.find(composition=>composition.id===key);
     syncingCompositions++;
     try {
-      if (key==='main') await refreshMainCompositions();
-      return await materialize(item,key==='main'?entry.main:item.sequence);
+      return await materialize(item,key==='main'?await resolveCompositionClips(entry.main):item.sequence);
     } finally { syncingCompositions--; }
   }
 });
@@ -468,6 +542,7 @@ function history(from, to) {
   to.push(project);
   from.pop();
   project = next;
+  if (sequenceKey==='main') refreshCompositionLinks();
   persist();
   renderTimeline();
 }
@@ -1218,6 +1293,10 @@ function copyTimelineClip(cut = false) {
 }
 
 function pasteGroup(items, at, copies=1) {
+  if (sequenceKey!=='main' && items.some(item=>item.composition)) {
+    notify('Paste linked compositions on Main.');
+    return false;
+  }
   if (items.some(item=>!guardTrack(trackOf(item)))) return false;
   const origin = Math.min(...items.map(item=>item.start));
   const period = Math.max(...items.map(item=>item.start+item.len))-origin;
@@ -1271,6 +1350,7 @@ function pasteGroup(items, at, copies=1) {
 function pasteTimelineClip(at = cursor) {
   if (!timelineClipboard?.clip) return;
   const clip = structuredClone(timelineClipboard.clip);
+  if (clip.composition && sequenceKey!=='main') return notify('Paste linked compositions on Main.');
   if(selectedTrack){
     const [type,number]=selectedTrack.split(':');
     if(trackOf(clip).split(':')[0] !== type) {
@@ -1448,6 +1528,8 @@ function renderInspector() {
       return;
     }
     panel.append(node('h2', 'inspector-name', asset.name));
+    const linked = clip.asset===compositionAssetKey(clip.composition);
+    if (linked) panel.append(button('Open composition',()=>openSequence(clip.composition)));
     panel.append(videoTransformControls(clip,transformOpen));
     const timing = node('div', 'property-line');
     const remaining = laneNeighbors(clip).next - clip.start;
@@ -1474,7 +1556,7 @@ function renderInspector() {
       actions.append(button('Extract audio', () => extractAudio(clip), extracted),
         button(clip.muted ? 'Unmute original audio' : 'Mute original audio', () => change(() => { clip.muted = !clip.muted; })));
     }
-    if (page==='edit' && !asset.alpha) {
+    if (page==='edit' && !asset.alpha && !linked) {
       actions.append(button('Find closest loop',()=>void findClosestLoop(clip),clip.len<30 || looping));
       if(asset.loop) {
         let minutes=60;
@@ -1688,7 +1770,7 @@ async function autoCaptions() {
   renderTools();
   notify('Transcribing timeline dialogue on this PC…');
   try {
-    const result=await jsonPost('/api/transcribe',{ ...snapshot,language:speechLanguage });
+    const result=await jsonPost('/api/transcribe',{ ...await resolveCompositionClips(snapshot),language:speechLanguage });
     const now=JSON.stringify([project.clips,project.overlays,project.sounds]);
     if(now!==JSON.stringify([snapshot.clips,snapshot.overlays,snapshot.sounds])) { notify('The audio edit changed. Generate captions again for the current cut.'); return; }
     addCues(readSrt(result.srt).map(cue=>({...cue,len:Math.min(cue.len,result.endFrame-cue.start)})).filter(cue=>cue.len>0));
@@ -2063,7 +2145,7 @@ async function matchTimeline() {
   if (importing || !project.gradeReference) return;
   importing = true;
   const target = project.gradeReference;
-  const shots = [...project.clips,...project.overlays].filter(item => bin.has(item.asset) && !bin.get(item.asset).alpha && item.id !== target.id);
+  const shots = [...project.clips,...project.overlays].filter(item => !isLiveComposition(item) && bin.has(item.asset) && !bin.get(item.asset).alpha && item.id !== target.id);
   const matched = [];
   let failed = 0;
   try {
@@ -2127,10 +2209,10 @@ function renderTools() {
     categories.onchange = () => { effectCategory = categories.value; if (effectCategory !== 'Video tools') cancelPicking(); renderTools(); };
     tools.append(categories);
     if (effectCategory === 'Video tools') {
-      tools.append(button('Upscale selected footage', () => void upscale(clip), !clip?.asset),
+      tools.append(button('Upscale selected footage', () => void upscale(clip), !clip?.asset || Boolean(clip.composition)),
         node('p', 'subtle', 'Upscale creates a new clip using Lanczos scaling.'),
         node('h2','','Motion tracking'),
-        button('Draw region in preview', () => beginPicking(clip), !clip?.asset || Boolean(clip.track)),
+        button('Draw region in preview', () => beginPicking(clip), !clip?.asset || Boolean(clip.track || clip.composition)),
         button('Track motion', () => void trackMotion(), !trackingBox || trackingSource !== clip?.id));
       if (tracked?.points?.length) {
         const target = node('select','tool-select');
@@ -2175,7 +2257,7 @@ function renderTools() {
       if (lut) select.add(new Option(lut.name,lut.id));
     }
     select.value = clip?.lut || '';
-    select.disabled = !clip?.asset;
+    select.disabled = !clip?.asset || Boolean(clip.composition);
     select.onchange = () => change(() => { clip.lut = select.value; });
     const links = node('div','inline-actions');
     for (const [label,url] of [
@@ -2192,9 +2274,9 @@ function renderTools() {
     }
     tools.append(node('h2','','Camera LUT'), select, links,
       node('p','subtle','Choose the LUT for your camera and recording profile. Unzip DJI downloads before importing.'),
-      button('Auto grade', () => void grade(clip, false), !clip?.asset),
-      button('Use shot as reference', () => void grade(clip, 'reference'), !clip?.asset),
-      button('Match reference', () => void grade(clip, true), !clip?.asset || !project.gradeReference),
+      button('Auto grade', () => void grade(clip, false), !clip?.asset || Boolean(clip.composition)),
+      button('Use shot as reference', () => void grade(clip, 'reference'), !clip?.asset || Boolean(clip.composition)),
+      button('Match reference', () => void grade(clip, true), !clip?.asset || Boolean(clip.composition) || !project.gradeReference),
       button('Match timeline to reference', () => void matchTimeline(), !project.gradeReference));
     if (clip) {
       const label = node('input');
@@ -2320,11 +2402,11 @@ async function addGraphic(kind, file, settings) {
   finally { importing = false; }
 }
 
-function fittedMediaSize(clip, el) {
+function fittedMediaSize(clip, el, sequence=project) {
   const asset = bin.get(clip.asset);
   const ratio = el.readyState && el.videoWidth && el.videoHeight ? el.videoWidth/el.videoHeight :
     (asset?.width || 1920)/(asset?.height || 1080);
-  const [width,height] = sequenceSize(project);
+  const [width,height] = sequenceSize(sequence);
   const [w,h] = fittedVideoSize(videoFit(clip),ratio,width,height);
   return { w:w/width*videoStretch(clip.stretchWidth)/100,
     h:h/height*videoStretch(clip.stretchHeight)/100, aspect:width/height };
@@ -2555,7 +2637,7 @@ function makeClip(clip, video) {
   block.style.width = `max(2px, calc(${clip.len} * var(--frame-width) - 1px))`;
   block.dataset.frames = clip.len;
   block.classList.toggle('narrow-clip', pixels(clip.len) < 18);
-  if (asset && video) {
+  if (asset && video && !asset.composition) {
     const film = node('div', 'clip-film');
     film.style.backgroundImage = `url("${diskURL(asset.id, 'thumb.jpg')}")`;
     block.append(film);
@@ -2952,7 +3034,7 @@ function showVideo(item, frame, force) {
   }
   active.hidden = false;
   const next = timeline[timeline.indexOf(item) + 1];
-  if (next && bin.has(next.asset) &&
+  if (next && !isLiveComposition(next) && bin.has(next.asset) &&
       (spare.dataset.asset !== next.asset || spare.preloadClip !== next.id)) {
     spare.preloadClip = next.id;
     setSource(spare, next, next.start);
@@ -2961,37 +3043,43 @@ function showVideo(item, frame, force) {
 
 function display(frame, seek = false) {
   const item = timeline.find(item => frame >= item.start && frame < item.start + item.len);
-  showVideo(item, frame, seek);
-  if (item) { styleVideoMotion(active, item, frame - item.start); setAudioLevel(active,item); }
-  displayOverlays(frame, seek);
+  const linked = isLiveComposition(item);
+  showVideo(linked ? null : item, frame, seek);
+  if (item && !linked) { styleVideoMotion(active, item, frame - item.start); setAudioLevel(active,item); }
+  displayCompositionViews(linked ? item : null,frame,seek);
+  displayVideoLayers(project.overlays,overlayPlayers,$('preview-overlays'),project,frame,seek);
   displaySounds(frame,seek);
-  const titleNodes = [];
-  const visible=project.titles.filter(title => frame >= title.start && frame < title.start + title.len && title.style!=='caption' && !trackSettings(project,trackOf(title)).muted);
-  let left=0,right=captionOrder.length;
-  while(left<right){
-    const middle=(left+right)>>>1;
-    if(captionOrder[middle].start<=frame) left=middle+1;
-    else right=middle;
-  }
-  const lastCaption=captionOrder[left-1];
-  if(lastCaption && frame<lastCaption.start+lastCaption.len && !trackSettings(project,'caption:5').muted) visible.push(lastCaption);
-  for (const title of visible.sort((a,b) => (a.track || 1) - (b.track || 1))) {
-    const layer = node('div','program-title-layer');
-    const label = node('div', 'preview-title');
-    label.dataset.previewTitle=title.id;
-    const offset = frame - title.start;
-    styleTitle(label,title,offset);
-    layer.append(label);
-    styleMotion(layer, title, offset);
-    titleNodes.push(layer);
-  }
-  $('preview-titles').replaceChildren(...titleNodes);
+  displayTitles(project,captionOrder,$('stage'),$('preview-titles'),frame);
   $('preview-empty').hidden = duration > 0;
   $('playhead').style.left = `${pixels(frame)}px`;
   $('timecode').textContent = timecode(frame);
   $('duration').textContent = timecode(duration);
   updateButtons();
   updateKeyControls();
+}
+
+function displayTitles(sequence,captions,stage,container,frame) {
+  const titleNodes = [];
+  const visible=sequence.titles.filter(title => frame >= title.start && frame < title.start + title.len && title.style!=='caption' && !trackSettings(sequence,trackOf(title)).muted);
+  let left=0,right=captions.length;
+  while(left<right){
+    const middle=(left+right)>>>1;
+    if(captions[middle].start<=frame) left=middle+1;
+    else right=middle;
+  }
+  const lastCaption=captions[left-1];
+  if(lastCaption && frame<lastCaption.start+lastCaption.len && !trackSettings(sequence,'caption:5').muted) visible.push(lastCaption);
+  for (const title of visible.sort((a,b) => (a.track || 1) - (b.track || 1))) {
+    const layer = node('div','program-title-layer');
+    const label = node('div', 'preview-title');
+    label.dataset.previewTitle=title.id;
+    const offset = frame - title.start;
+    styleTitle(label,title,offset,stage);
+    layer.append(label);
+    styleMotion(layer, title, offset);
+    titleNodes.push(layer);
+  }
+  container.replaceChildren(...titleNodes);
 }
 
 function styleTitle(label,title,offset,stage=$('stage')) {
@@ -3028,14 +3116,14 @@ function styleTitle(label,title,offset,stage=$('stage')) {
   label.style.textShadow=shadow.join(',') || 'none';
 }
 
-function displaySounds(frame,seek) {
-  const visible=project.sounds.filter(clip=>bin.has(clip.asset) && !clip.muted && frame>=clip.start && frame<clip.start+clip.len);
-  for(const [id,el] of audioPlayers) {
+function displaySounds(frame,seek,sequence=project,media=audioPlayers,parentMix) {
+  const visible=sequence.sounds.filter(clip=>bin.has(clip.asset) && !clip.muted && frame>=clip.start && frame<clip.start+clip.len);
+  for(const [id,el] of media) {
     if(visible.some(clip=>clip.id===id)) continue;
-    el.pause(); audioPlayers.delete(id);
+    el.pause(); media.delete(id);
   }
   for(const clip of visible) {
-    let el=audioPlayers.get(clip.id);
+    let el=media.get(clip.id);
     const fresh=!el;
     if(fresh){
       el=new Audio(diskURL(clip.asset,'audio.wav'));
@@ -3043,22 +3131,22 @@ function displaySounds(frame,seek) {
       el.addEventListener('loadedmetadata',()=>{
         if(el.pendingSeek!==undefined){mediaPosition(el,el.pendingSeek);delete el.pendingSeek;}
       });
-      audioPlayers.set(clip.id,el);
+      media.set(clip.id,el);
     }
     const local=frame-clip.start;
     const target=seconds(clip.in+local);
     if(fresh || seek || Math.abs(el.currentTime-target)>.14) mediaPosition(el,target);
     const fadeIn=clip.fadeIn? Math.min(1,local/clip.fadeIn):1;
     const fadeOut=clip.fadeOut?clamp((clip.len-local)/clip.fadeOut,0,1):1;
-    setAudioLevel(el,clip,fadeIn*fadeOut);
+    setAudioLevel(el,clip,fadeIn*fadeOut,sequence,parentMix);
     if(playing && el.paused) el.play().catch(()=>{});
   }
 }
 
-function setAudioLevel(element, clip, envelope=1) {
-  const mix=clipMix(project,clip);
-  element.muted=mix.muted;
-  element.volume=clamp(10**(mix.gain/20)*envelope,0,1);
+function setAudioLevel(element, clip, envelope=1, sequence=project, parentMix) {
+  const mix=clipMix(sequence,clip);
+  element.muted=mix.muted || Boolean(parentMix?.muted);
+  element.volume=clamp(10**((mix.gain+(parentMix?.gain || 0))/20)*envelope,0,1);
 }
 
 function styleMotion(el, clip, local) {
@@ -3070,28 +3158,69 @@ function styleMotion(el, clip, local) {
   el.style.clipPath = `inset(${value('top')}% ${value('right')}% ${value('bottom')}% ${value('left')}%)`;
 }
 
-function styleVideoMotion(el,clip,local) {
+function styleVideoMotion(el,clip,local,sequence=project) {
   const framing = hasVideoFraming(clip);
   if (el.classList.contains('framed-video')!==framing) el.classList.toggle('framed-video',framing);
   if (framing) {
-    const {w,h} = fittedMediaSize(clip,el);
+    const {w,h} = fittedMediaSize(clip,el,sequence);
     el.style.setProperty('--fit-width',`${w*100}cqw`);
     el.style.setProperty('--fit-height',`${h*100}cqh`);
   }
   styleMotion(el,clip,local);
 }
 
-function displayOverlays(frame, seek) {
-  const visible = project.overlays.filter(clip => bin.has(clip.asset) && frame >= clip.start && frame < clip.start + clip.len)
-    .sort((a,b) => a.track - b.track);
-  for (const [id, el] of overlayPlayers) {
+function isLiveComposition(clip) {
+  return Boolean(clip?.composition && clip.asset===compositionAssetKey(clip.composition));
+}
+
+function displayCompositionViews(base,frame,seek) {
+  const visible = project.overlays.filter(clip=>isLiveComposition(clip) && frame>=clip.start && frame<clip.start+clip.len);
+  if (base) visible.unshift(base);
+  for (const [key,view] of compositionViews) {
+    if (visible.some(clip=>clip.id===key)) continue;
+    for (const el of [...view.video.values(),...view.audio.values()]) el.pause();
+    view.frame.remove();
+    compositionViews.delete(key);
+  }
+  for (const clip of visible) {
+    const sequence = entry.compositions.find(item=>item.id===clip.composition)?.sequence;
+    if (!sequence) continue;
+    let view = compositionViews.get(clip.id);
+    if (!view) {
+      const frame = node('div','composition-preview');
+      const stage = node('div','composition-preview-stage');
+      const titles = node('div','composition-preview-titles');
+      stage.append(titles);
+      frame.append(stage);
+      if (clip.track) $('preview-overlays').append(frame);
+      else $('stage').insertBefore(frame,$('preview-overlays'));
+      view = { frame,stage,titles,video:new Map(),audio:new Map(),captions:sequence.titles.filter(title=>title.style==='caption').sort((a,b)=>a.start-b.start) };
+      compositionViews.set(clip.id,view);
+    }
+    const {w,h} = fittedMediaSize(clip,view.frame);
+    view.frame.style.width = `${w*100}%`;
+    view.frame.style.height = `${h*100}%`;
+    view.frame.style.zIndex = clip.track || 0;
+    const local = frame-clip.start;
+    styleMotion(view.frame,clip,local);
+    const position = clip.in+local;
+    const mix = clipMix(project,clip);
+    displayVideoLayers([...sequence.clips,...sequence.overlays],view.video,view.stage,sequence,position,seek,mix);
+    displaySounds(position,seek,sequence,view.audio,mix);
+    displayTitles(sequence,view.captions,view.stage,view.titles,position);
+  }
+}
+
+function displayVideoLayers(clips,media,container,sequence,frame,seek,parentMix) {
+  const visible = clips.filter(clip => !isLiveComposition(clip) && bin.has(clip.asset) && frame >= clip.start && frame < clip.start + clip.len);
+  for (const [id, el] of media) {
     if (visible.some(clip => clip.id === id)) continue;
     el.pause();
     el.remove();
-    overlayPlayers.delete(id);
+    media.delete(id);
   }
   for (const clip of visible) {
-    let el = overlayPlayers.get(clip.id);
+    let el = media.get(clip.id);
     const fresh = !el;
     if (fresh) {
       el = node('video');
@@ -3099,18 +3228,19 @@ function displayOverlays(frame, seek) {
       el.preload = 'auto';
       el.addEventListener('loadedmetadata', () => {
         if (el.pendingSeek !== undefined) { mediaPosition(el,el.pendingSeek); delete el.pendingSeek; }
-        const current = project.overlays.find(item=>item.id===clip.id);
-        if (current && overlayPlayers.get(clip.id)===el) styleVideoMotion(el,current,cursor-current.start);
+        const { clip, local, sequence } = el.previewFrame;
+        if (media.get(clip.id)===el) styleVideoMotion(el,clip,local,sequence);
       });
-      $('preview-overlays').append(el);
-      overlayPlayers.set(clip.id,el);
+      container.append(el);
+      media.set(clip.id,el);
     }
-    el.style.zIndex = clip.track;
-    setAudioLevel(el,clip);
+    el.style.zIndex = clip.track || 0;
+    el.previewFrame = { clip, local:frame-clip.start, sequence };
+    setAudioLevel(el,clip,1,sequence,parentMix);
     if (fresh || seek) setSource(el, clip, frame);
     else if (Math.abs(el.currentTime - seconds(clip.in + frame - clip.start)) > .16) mediaPosition(el,seconds(clip.in + frame - clip.start));
     if (playing && el.paused) el.play().catch(() => {});
-    styleVideoMotion(el, clip, frame - clip.start);
+    styleVideoMotion(el, clip, frame - clip.start,sequence);
   }
 }
 
@@ -3118,6 +3248,7 @@ function pause() {
   playing = false;
   cancelAnimationFrame(raf);
   for (const el of [...players, ...overlayPlayers.values(), ...audioPlayers.values()]) el.pause();
+  for (const view of compositionViews.values()) for (const el of [...view.video.values(), ...view.audio.values()]) el.pause();
   $('play').textContent = '▶';
   $('play').setAttribute('aria-label', 'Play');
 }
@@ -3510,6 +3641,7 @@ function updateProgress(bar,task) {
 
 function taskDetail(task) {
   if(task.state==='ready') return 'Complete';
+  if(task.state==='cancelled') return 'Cancelled';
   if(task.state==='error') return task.error || 'Failed';
   const percent=task.progress==null?'':` · ${task.progress}%`;
   const eta=task.eta>=1 ? ` · about ${task.eta>=60 ? Math.ceil(task.eta/60)+' min' : task.eta+' sec'} left in this step` : '';
@@ -3545,6 +3677,11 @@ async function refreshActivity() {
           bar.setAttribute('aria-label',task.stage);
           updateProgress(bar,task);
           row.append(bar);
+          if (task.cancellable) row.append(button('Stop',async event=>{
+            event.currentTarget.disabled=true;
+            try { await jsonPost(`/api/tasks/${task.id}/cancel`,{}); }
+            catch(error) { notify(error.message); }
+          }));
         }
         list.append(row);
       }
@@ -3653,6 +3790,7 @@ space.addEventListener('contextmenu',event=>{
     action('Make copies…',repeatSelection,locked);
     action('Delete · leave gap',()=>removeClip(false),locked);
     action('Ripple delete · close gap',()=>removeClip(true),locked || group.length>1);
+    if (group.length===1 && isLiveComposition(clip)) action('Open composition',()=>openSequence(clip.composition));
     if(group.length===1 && clip.asset && clip.kind!=='audio' && bin.get(clip.asset)?.audio!=null) action('Extract audio',()=>extractAudio(clip),locked||project.sounds.some(item=>item.extractedFrom===clip.id));
   } else if(lane){
     selectTrack(lane.dataset.trackKey);
@@ -3835,8 +3973,12 @@ $('clear-range').onclick = () => change(()=>{ project.markIn = null; project.mar
 $('preview-quality').onchange = async event => {
   const request=++qualityRequest;
   const quality=event.target.value;
-  const visible=[timeline.find(clip=>cursor>=clip.start && cursor<clip.start+clip.len),
-    ...project.overlays.filter(clip=>cursor>=clip.start && cursor<clip.start+clip.len)].filter(Boolean);
+  const at = (clips,frame) => clips.filter(clip=>frame>=clip.start && frame<clip.start+clip.len);
+  const visible = at([...timeline,...project.overlays],cursor).flatMap(clip=>{
+    if (!isLiveComposition(clip)) return [clip];
+    const sequence=entry.compositions.find(item=>item.id===clip.composition)?.sequence;
+    return sequence ? at([...sequence.clips,...sequence.overlays],clip.in+cursor-clip.start) : [];
+  }).filter(clip=>bin.has(clip.asset) && !isLiveComposition(clip));
   if(quality!==previewQuality && visible.length) notify(`Preparing ${quality} preview…`);
   try {
     await Promise.all(visible.map(async clip=>{
@@ -3960,14 +4102,15 @@ $('export-form').onsubmit = async event => {
   $('export-status').textContent = 'Preparing render…';
   notify('Rendering video…');
   try {
-    if (sequenceKey==='main') await refreshMainCompositions();
-    const output = { ...project };
-    if ($('resolution').value!=='canvas') {
-      output.resolution = $('resolution').value;
+    const settings = $('resolution').value;
+    const useRange = $('export-use-range').checked;
+    const output = await resolveCompositionClips(structuredClone(project));
+    if (settings!=='canvas') {
+      output.resolution = settings;
       delete output.width;
       delete output.height;
     }
-    if (!$('export-use-range').checked) output.markIn = output.markOut = null;
+    if (!useRange) output.markIn = output.markOut = null;
     let job = await api('/api/exports', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Framecut': '1' },
       body: JSON.stringify(output)
@@ -3978,7 +4121,7 @@ $('export-form').onsubmit = async event => {
       $('progress').value = job.progress;
       $('export-status').textContent = `Rendering · ${job.progress}%`;
     }
-    if (job.status === 'error') throw new Error(job.error);
+    if (job.status !== 'ready') throw new Error(job.error || 'Export cancelled.');
     $('export-status').textContent = `${job.filename} is ready.`;
     const download = $('download');
     download.href = `/api/exports/${job.id}/download`;
@@ -4005,7 +4148,7 @@ $('export-form').onsubmit = async event => {
     notify(window.framecutDesktop ? 'Export ready to save' : 'Export ready to download');
   } catch (error) {
     $('export-status').textContent = error.message;
-    notify('Export failed');
+    notify(error.message==='Task cancelled.'?'Export cancelled.':'Export failed');
   } finally {
     exporting = false;
     $('render').disabled = false;

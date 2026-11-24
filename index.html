@@ -193,6 +193,15 @@
       <div class="dialog-actions"><button id="sequence-submit" class="primary">Save settings</button></div>
     </form>
   </dialog>
+  <dialog id="composition-delete-dialog" aria-labelledby="composition-delete-title" aria-describedby="composition-delete-name composition-delete-effects">
+    <form id="composition-delete-form">
+      <div class="dialog-head"><h2 id="composition-delete-title">Delete composition</h2></div>
+      <p id="composition-delete-name"></p>
+      <p id="composition-delete-effects" class="subtle">This also removes its linked clips and clears its video from any LED walls using it.</p>
+      <output id="composition-delete-status" role="status"></output>
+      <div class="dialog-actions"><button id="composition-delete-cancel" class="secondary" type="button" autofocus>Cancel</button><button class="secondary composition-delete" type="submit">Delete composition</button></div>
+    </form>
+  </dialog>
   <dialog id="export-dialog">
     <form id="export-form">
       <div class="dialog-head"><h2>Export video</h2><button id="close-dialog" class="icon" type="button" aria-label="Close export">×</button></div>

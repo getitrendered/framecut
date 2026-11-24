@@ -34,10 +34,15 @@
 #composition-drawer { position:fixed; top:116px; right:16px; z-index:30; width:min(345px,calc(100vw - 26px)); max-height:calc(100vh - 132px); display:flex; flex-direction:column; box-shadow:0 14px 50px #0009; }
 .drawer-actions, .drawer-empty { padding:12px; }
 #composition-list { overflow:auto; }
-.composition-row { display:grid; grid-template-columns:1fr auto; align-items:center; gap:5px; padding:5px 10px; border-top:1px solid var(--line); cursor:grab; }
+.composition-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:5px; padding:5px 10px; border-top:1px solid var(--line); cursor:grab; }
 .composition-select { display:grid; text-align:left; gap:4px; padding:6px 9px; background:transparent; overflow-wrap:anywhere; }
 .composition-select.current { color:var(--accent); }
 .composition-select .subtle { font-size:11px; }
+.composition-delete { color:#ffb4ae; }
+.composition-row .composition-delete { padding-inline:8px; font-size:12px; }
+#composition-delete-dialog .composition-delete { background:#552e2d; border-color:#945350; }
+#composition-delete-status { color:#ffb4ae; }
+#composition-delete-status:empty { display:none; }
 .canvas-fields { display:grid; grid-template-columns:1fr 1fr auto; align-items:end; gap:8px; }
 .canvas-fields button { min-height:35px; }
 .export-range-choice { display:flex; align-items:center; gap:7px; }

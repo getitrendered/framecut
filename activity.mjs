@@ -4,28 +4,32 @@ import { randomUUID } from 'node:crypto';
 const active = new AsyncLocalStorage();
 const tasks = new Map();
 
-export async function withTask(label, operation) {
+export async function withTask(label, operation, { cancellable = false } = {}) {
   const id = randomUUID();
   const now = Date.now();
-  const task = { id, label, state:'working', stage:label, progress:null, eta:null, updated:now, stageStarted:now };
-  tasks.set(id,task);
+  const task = { id, label, state:'working', stage:label, progress:null, eta:null, updated:now, stageStarted:now, cancellable };
+  const controller = cancellable ? new AbortController() : null;
+  tasks.set(id,{ task, controller });
   try {
-    const result = await active.run(task,operation);
+    const result = await active.run({task,controller},operation);
+    controller?.signal.throwIfAborted();
     Object.assign(task,{state:'ready',progress:100,eta:null});
     return result;
   } catch(error) {
-    Object.assign(task,{state:'error',progress:null,eta:null,error:error.message.split('\n')[0].slice(0,250)});
+    Object.assign(task,{state:controller?.signal.aborted?'cancelled':'error',progress:null,eta:null,error:error.message.split('\n')[0].slice(0,250)});
     throw error;
   } finally {
+    task.cancellable=false;
     task.updated=Date.now();
-    const finished=[...tasks.values()].filter(item=>item.state!=='working');
+    const finished=activityList().filter(item=>item.state!=='working').reverse();
     for(const previous of finished.slice(0,Math.max(0,finished.length-12))) tasks.delete(previous.id);
   }
 }
 
 export function taskStage(stage, progress=null) {
-  const task=active.getStore();
-  if(!task) return;
+  const context=active.getStore();
+  if(!context || context.controller?.signal.aborted) return;
+  const {task}=context;
   const now=Date.now();
   if(task.stage!==stage) task.stageStarted=now;
   const percent=Number.isFinite(progress)?Math.min(100,Math.max(0,progress)):null;
@@ -35,9 +39,19 @@ export function taskStage(stage, progress=null) {
 }
 
 export function activityList() {
-  return [...tasks.values()].sort((a,b)=>b.updated-a.updated);
+  return [...tasks.values()].map(item=>item.task).sort((a,b)=>b.updated-a.updated);
 }
 
 export function hasActiveTasks() {
-  return [...tasks.values()].some(task=>task.state==='working');
+  return [...tasks.values()].some(({task})=>task.state==='working');
+}
+
+export const taskSignal = () => active.getStore()?.controller?.signal;
+
+export function cancelTask(id) {
+  const item=tasks.get(id);
+  if (!item?.task.cancellable) return false;
+  Object.assign(item.task,{cancellable:false,stage:'Stopping…',progress:null,eta:null,updated:Date.now()});
+  item.controller.abort(new Error('Task cancelled.'));
+  return true;
 }

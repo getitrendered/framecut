@@ -16,7 +16,7 @@ import { installedFontNames, stageTitleFont } from './fonts.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
 import { clipMix, trackOf, trackSettings } from './tracks.mjs';
-import { activityList, taskStage, withTask } from './activity.mjs';
+import { activityList, cancelTask, taskSignal, taskStage, withTask } from './activity.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const data = resolve(process.env.FRAMECUT_DATA || join(root, 'data'));
@@ -68,7 +68,9 @@ for (const file of await readdir(lutRoot)) {
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true, cwd: options.cwd, env:options.env });
+    const signal = taskSignal();
+    signal?.throwIfAborted();
+    const child = spawn(command, args, { windowsHide: true, cwd: options.cwd, env:options.env, signal });
     workers.add(child);
     if (options.input) pipeline(Readable.from(options.input),child.stdin).catch(() => {});
     else child.stdin.end();
@@ -86,14 +88,16 @@ function run(command, args, options = {}) {
       errors = (errors + chunk).slice(-8000);
     });
     child.on('error', error => {
-      workers.delete(child);
+      if (error.name !== 'AbortError') workers.delete(child);
+      if (error.name === 'AbortError') return;
       reject(error.code === 'ENAMETOOLONG'
         ? new Error('Windows could not start the media encoder. Try exporting a shorter In/Out range or reducing overlapping tracks.')
         : error);
     });
     child.on('close', code => {
       workers.delete(child);
-      if (code === 0) resolve(options.binary ? Buffer.concat(chunks) : output);
+      if (signal?.aborted) reject(signal.reason);
+      else if (code === 0) resolve(options.binary ? Buffer.concat(chunks) : output);
       else reject(new Error(errors.trim() || `${command} exited with code ${code}`));
     });
   });
@@ -794,7 +798,6 @@ async function render(job, project, timeline) {
       });
     }
     job.progress = 100;
-    if (!job.composition) job.status = 'ready';
   } catch (error) {
     job.status = 'error';
     job.error = error.message;
@@ -1143,6 +1146,8 @@ const server = createServer(async (req, res) => {
         return await serveFile(req, res, getRender(job.id).path, type, job.filename);
       }
     } else if (req.method === 'POST' && req.headers['x-framecut'] === '1') {
+      const cancel = /^\/api\/tasks\/([a-f\d-]+)\/cancel$/.exec(path);
+      if (cancel) return cancelTask(cancel[1]) ? json(res,200,{cancelled:true}) : json(res,409,{error:'This task has already finished or is stopping.'});
       if (path === '/api/media') return json(res, 201, await importVideo(req));
       if (path === '/api/audio') return json(res,201,await withTask('Importing audio',()=>importAudio(req)));
       if (path === '/api/sound') return json(res,201,await withTask('Creating sound',async()=>createSound(await requestJson(req))));
@@ -1174,24 +1179,29 @@ const server = createServer(async (req, res) => {
         const job = { id: randomUUID(), status: 'rendering', progress: 0, filename: `${name}.${format}`, format, composition };
         exports.set(job.id, job);
         void withTask(composition ? `Prepare composition · ${request.name || name}` : `Export ${job.filename}`,async()=>{
-          taskStage(composition ? 'Preparing composition' : 'Preparing export');
-          await render(job,project,timeline);
-          if(job.status==='error') throw new Error(job.error);
-          if (composition) {
-            const folder = join(data, 'renders', job.id);
-            try {
+          const signal = taskSignal();
+          const folder = join(data, 'renders', job.id);
+          try {
+            taskStage(composition ? 'Preparing composition' : 'Preparing export');
+            await render(job,project,timeline);
+            signal.throwIfAborted();
+            if(job.status==='error') throw new Error(job.error);
+            if (composition) {
               const video = join(folder, `video.${format}`);
               job.asset = await ingest(randomUUID(), String(request.name || name).slice(0,80),
                 destination => rename(video, destination), { registerEarly:true, composition:true });
-            } finally {
               await rm(folder, {recursive:true, force:true}).catch(()=>{});
             }
+            signal.throwIfAborted();
             job.status = 'ready';
+          } catch (error) {
+            job.status = signal.aborted ? 'cancelled' : 'error';
+            job.error = error.message;
+            throw error;
+          } finally {
+            if (job.status !== 'ready') await rm(folder, {recursive:true, force:true}).catch(()=>{});
           }
-        }).catch(error=>{
-          job.status = 'error';
-          job.error = error.message;
-        });
+        }, {cancellable:true}).catch(()=>{});
         return json(res, 202, job);
       }
     }

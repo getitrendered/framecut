@@ -59,9 +59,22 @@ function button(label, action, style='secondary') {
   return control;
 }
 
-export function projectControls({ entries, current, assets, open, create, edit, openSequence, addComposition, timecode }) {
+export function projectControls({ entries, current, assets, open, create, edit, openSequence, addComposition, deleteComposition, timecode }) {
   let applySettings;
+  let deleteKey;
   const dialog = $('sequence-dialog');
+  const deleteDialog = $('composition-delete-dialog');
+  $('composition-delete-cancel').onclick = () => deleteDialog.close();
+  $('composition-delete-form').onsubmit = event => {
+    event.preventDefault();
+    try {
+      deleteComposition(deleteKey);
+      deleteDialog.close();
+      $('composition-create').focus();
+    } catch (error) {
+      $('composition-delete-status').textContent = error.message;
+    }
+  };
   const dimensions = () => [$('canvas-width').valueAsNumber, $('canvas-height').valueAsNumber];
   const updateSize = () => {
     const [width, height] = dimensions();
@@ -139,10 +152,15 @@ export function projectControls({ entries, current, assets, open, create, edit, 
       const sequence = entry.main;
       const card = button('', () => open(entry.id), 'project-card');
       const cover = element('span', 'project-cover');
-      const clip = [...sequence.clips, ...(sequence.overlays || [])].find(item=>assets.has(item.asset));
-      if (clip) {
+      const coverAsset = [...sequence.clips, ...(sequence.overlays || [])].map(clip=>{
+        const asset = assets.get(clip.asset);
+        if (asset && !clip.asset.startsWith('comp-')) return asset;
+        const source = entry.compositions.find(item=>item.id===clip.composition)?.sequence;
+        return source && [...source.clips,...(source.overlays || [])].map(item=>assets.get(item.asset)).find(Boolean);
+      }).find(Boolean);
+      if (coverAsset) {
         const image = element('img');
-        image.src = `/media/${clip.asset}/thumb.jpg`;
+        image.src = `/media/${coverAsset.id}/thumb.jpg`;
         image.alt = '';
         image.loading = 'lazy';
         cover.append(image);
@@ -189,10 +207,18 @@ export function projectControls({ entries, current, assets, open, create, edit, 
       const [w,h] = sequenceSize(item.sequence);
       const length = sequenceDuration(item.sequence, contentDuration(item.sequence));
       openButton.append(element('span', 'subtle', `${w} × ${h} · ${timecode(length)}`));
-      row.append(openButton, button('＋', () => addComposition(item.id), 'icon'));
-      row.lastChild.title = 'Add composition to Main';
-      row.lastChild.setAttribute('aria-label', `Add ${item.sequence.name} to Main`);
-      row.lastChild.disabled = !length;
+      const addButton = button('＋', () => addComposition(item.id), 'icon');
+      addButton.title = 'Add composition to Main';
+      addButton.setAttribute('aria-label', `Add ${item.sequence.name} to Main`);
+      addButton.disabled = !length;
+      const deleteButton = button('Delete', () => {
+        deleteKey = item.id;
+        $('composition-delete-name').textContent = `Permanently delete “${item.sequence.name}”?`;
+        $('composition-delete-status').textContent = '';
+        deleteDialog.showModal();
+      }, 'secondary composition-delete');
+      deleteButton.setAttribute('aria-label', `Delete ${item.sequence.name}`);
+      row.append(openButton, addButton, deleteButton);
       row.draggable = length > 0;
       row.ondragstart = event => {
         event.dataTransfer.setData(compositionType, item.id);
@@ -212,13 +238,16 @@ export function projectControls({ entries, current, assets, open, create, edit, 
   $('composition-create').onclick = () => {
     const { entry } = current();
     const [width, height] = sequenceSize(entry.main);
-    settings('New composition', 'Create composition', { name:`Composition ${entry.compositions.length+1}`, width, height },
+    const names = new Set(entry.compositions.map(item=>item.sequence.name));
+    let number = 1;
+    while (names.has(`Composition ${number}`)) number++;
+    settings('New composition', 'Create composition', { name:`Composition ${number}`, width, height },
       values => create(values, true));
   };
   $('compositions-open').onclick = () => drawer($('composition-drawer').hidden);
   $('compositions-close').onclick = () => drawer(false);
   document.addEventListener('keydown', event => {
-    if (event.key==='Escape' && !dialog.open && !$('composition-drawer').hidden) drawer(false);
+    if (event.key==='Escape' && !dialog.open && !deleteDialog.open && !$('composition-drawer').hidden) drawer(false);
   });
   return { renderHome, renderSequences, drawer };
 }
