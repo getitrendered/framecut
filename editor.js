@@ -85,6 +85,7 @@ let sourceAsset = null;
 let previewQuality = 'auto';
 let videoImporting = false;
 let importToast;
+let saveFeedback;
 const proxyFallbacks=new Set();
 let qualityRequest=0;
 let effectCategory = 'Motion';
@@ -173,6 +174,21 @@ function persist() {
   }
 }
 
+function saveProject() {
+  if (!entry || page==='projects') return;
+  document.activeElement?.blur();
+  if (!persist()) return;
+  $('save-project').textContent = '✓ Saved';
+  $('save-state').textContent = `${entry.main.name} saved locally`;
+  clearTimeout(saveFeedback);
+  saveFeedback = setTimeout(()=>{
+    $('save-project').textContent = 'Save';
+    if ($('save-state').textContent===`${entry.main.name} saved locally`) $('save-state').textContent = 'Saved locally';
+  },2400);
+}
+
+$('save-project').onclick = saveProject;
+
 setupUpdates(()=>{
   document.activeElement?.blur();
   pause();
@@ -231,6 +247,8 @@ function openProject(key) {
   const next = catalog.projects.find(item=>item.id===key);
   if (!next) return false;
   saveView();
+  clearTimeout(saveFeedback);
+  $('save-project').textContent = 'Save';
   timelineClipboard = null;
   folder = 'all';
   sourceAsset = null;
@@ -711,6 +729,7 @@ function switchPage(next) {
   $('sequence-settings').hidden = next === 'led';
   $('export').hidden = next === 'projects' || next === 'led';
   $('import').hidden = next === 'projects';
+  $('save-project').hidden = next === 'projects';
   if (next!=='footage') $('source-audio').pause();
   if (next === 'projects' || next === 'led' || next === 'footage') controls.drawer(false);
   for (const tab of $('app-nav').querySelectorAll('[data-page]')) {
@@ -3269,6 +3288,12 @@ $('folder-form').onsubmit = event => {
   renderSource();
 };
 document.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase()==='s' &&
+      page!=='projects' && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    if (!event.repeat) saveProject();
+    return;
+  }
   if (page==='projects' || page==='led' || event.defaultPrevented || event.target.isContentEditable ||
       event.target.closest('input,select,textarea,dialog') || document.querySelector('dialog[open]')) return;
   const key = event.key.toLowerCase();
