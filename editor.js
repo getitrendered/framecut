@@ -4,7 +4,7 @@ import { soundPresets, soundSettings, soundWave } from '/sound.mjs';
 import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs';
 import { setupUpdates } from '/updates-ui.mjs';
 import { changesLockedClips, clipMix, clipsIn, gainDb, protectedTrack, trackOf, trackSettings } from '/tracks.mjs';
-import { contentDuration, exportRange, MAX_DURATION, sequenceDuration, sequenceSize } from '/sequences.mjs';
+import { contentDuration, exportRange, exportWindow, MAX_DURATION, sequenceDuration, sequenceSize } from '/sequences.mjs';
 import { catalogKey, compositionType, migrateProjectImports, projectControls, readCatalog } from '/projects.mjs';
 import { createLedWorkspace } from '/led.mjs';
 import '/layout.mjs';
@@ -437,12 +437,13 @@ function refreshCompositionLinks() {
   }
 }
 
-async function resolveCompositionClips(sequence) {
+async function resolveCompositionClips(sequence, window) {
   const resolved = new Map();
   const resolveLane = async clips => {
     const lane = [];
     for (const clip of clips) {
       if (!isLiveComposition(clip)) { lane.push(clip); continue; }
+      if (window && (clip.start>=window.end || clip.start+clip.len<=window.start)) continue;
       const item = entry.compositions.find(composition=>composition.id===clip.composition);
       if (!item) throw new Error('Remove the unavailable linked composition before rendering.');
       if (!resolved.has(item.id)) {
@@ -4104,13 +4105,19 @@ $('export-form').onsubmit = async event => {
   try {
     const settings = $('resolution').value;
     const useRange = $('export-use-range').checked;
-    const output = await resolveCompositionClips(structuredClone(project));
+    const snapshot = structuredClone(project);
+    if (!useRange) snapshot.markIn = snapshot.markOut = null;
+    const fullLength = sequenceDuration(snapshot,contentDuration(snapshot));
+    const range = exportRange(snapshot,fullLength);
+    if (!range.frames) throw new Error('The export Out point must follow the In point.');
+    const output = await resolveCompositionClips(snapshot,exportWindow(range,fullLength));
+    // Preserve the original range even if unused groups at the end are skipped.
+    if (output.clips.length!==snapshot.clips.length || output.overlays.length!==snapshot.overlays.length) output.fixedFrames = fullLength;
     if (settings!=='canvas') {
       output.resolution = settings;
       delete output.width;
       delete output.height;
     }
-    if (!useRange) output.markIn = output.markOut = null;
     let job = await api('/api/exports', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Framecut': '1' },
       body: JSON.stringify(output)

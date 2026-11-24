@@ -9,7 +9,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { expression, hasVideoFraming, points, properties, videoFit, videoStretch } from './motion.mjs';
-import { exportRange, sequenceDuration, sequenceSize } from './sequences.mjs';
+import { exportRange, exportWindow, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
 import { extrusionOffsets, textCharacters, textFragment, titleType, typewriterStep, typographyText, usesTextReveal, wrapText } from './text.mjs';
 import { installedFontNames, stageTitleFont } from './fonts.mjs';
@@ -777,13 +777,17 @@ async function render(job, project, timeline) {
     const titles = timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
     const inputs = [...timeline.clips,...timeline.overlays,...timeline.sounds,...titles];
     const renderCost = clip => clip.type?.gradient || clip.type?.depth>14 ? 4 : 1;
+    const window = exportWindow(range,timeline.total);
+    const windowCost = inputs.reduce((count,clip)=>clip.start<window.end && clip.start+clip.len>window.start ? count+renderCost(clip) : count,0);
     const stage = job.composition ? 'Rendering composition' : 'Rendering video';
     const report = (done, ceiling) => {
       job.progress = Math.min(ceiling,Math.round(done/range.frames*ceiling));
       taskStage(stage,job.progress);
     };
-    if (inputs.reduce((count,clip)=>count+renderCost(clip),0)<=renderInputLimit) {
-      await renderSection(folder,project,timeline,range,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99),fonts);
+    if (windowCost<=renderInputLimit) {
+      const part = window.start===0 && window.end===timeline.total ? timeline : timelineSection(timeline,window);
+      const localRange = { start:range.start-window.start, end:range.end-window.start, frames:range.frames };
+      await renderSection(folder,project,part,localRange,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99),fonts);
     } else {
       const sections = divideTimeline(inputs,range.start,range.end,renderCost);
       await withRenderSections(folder,sections,'nut',async(file,section)=>{
@@ -837,6 +841,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
   if(total>videoFrames) gap(total-videoFrames);
   // A one-frame segment can leave the concat filter with a zero-length timestamp span.
   const frameClock = `settb=1/${fps},setpts=N`;
+  const holdFrame = frames => frames>1 ? [`loop=loop=${frames-1}:size=1:start=0`,frameClock] : [];
   filter.push(`${segments.map(label=>`[${label}]`).join('')}concat=n=${segments.length}:v=1:a=0,${frameClock}[vbase]`);
   let video = 'vbase';
   for (const [index, clip] of overlays.entries()) {
@@ -869,7 +874,9 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     const wrapped=wrapText(title.text,maxColumns);
     const chars = textCharacters(wrapped);
     const reveal = usesTextReveal(title);
-    const count = reveal || title.typewriter ? Math.min(chars.length,24) : 1;
+    const animatedText = reveal || title.typewriter;
+    const count = animatedText ? Math.min(chars.length,24) : 1;
+    const rasterFrames = animatedText ? visibleLength : 1;
     const sourceLength = title.sourceLength ?? title.len;
     const localFrame = title.sectionOffset ? `(n+${title.sectionOffset})` : 'n';
     const progress = reveal ? expression(title,'reveal',localFrame) : '';
@@ -888,7 +895,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       const limit = part + 1 === count ? sourceLength : (part + 1) * step;
       const enable = reveal ? `gt(${progress},${part*100/count})*lte(${progress},${(part+1)*100/count})`
         : `gte(${localFrame},${part*step})*lt(${localFrame},${limit})`;
-      const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}:enable='${enable}'`;
+      const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}${animatedText ? `:enable='${enable}'` : ''}`;
       if(type.shadow) shadow.push(`${base}:fontcolor=black@${type.shadow/100}:x=(${x})+(${Math.round(type.shadowX*units)}):y=(${y})+(${Math.round(type.shadowY*units)})`);
       const box=type.boxOpacity ? `:box=1:boxcolor=${color(type.background,type.boxOpacity)}:boxborderw=${Math.round(type.padding*units)}` : '';
       if(box && depth.length) draw.push(`${base}:fontcolor=white@0:x=${x}:y=${y}${box}`);
@@ -903,8 +910,9 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       if (type.gradient) mask.push(`${base}:fontcolor=white:x=${x}:y=${y}`);
     }
     if(shadow.length && type.blur) shadow.push(`gblur=sigma=${Math.max(.1,type.blur*units)}:planes=8`);
-    const canvas = `color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength}`;
-    const finish = [...motionFilters(title),`setpts=PTS+${caption?0:title.start}/(${fps}*TB)`].join(',');
+    const canvas = `color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${rasterFrames}`;
+    // Repeat the painted text before motion so its keyframes still run on every frame.
+    const finish = [...(animatedText ? [] : holdFrame(visibleLength)),...motionFilters(title),`setpts=PTS+${caption?0:title.start}/(${fps}*TB)`].join(',');
     if (type.gradient) {
       const faceWidth = Math.min(width*.9,longest*fontSize*(.56+type.tracking*.08));
       const faceHeight = fontSize*(.78+(wrapped.split('\n').length-1)*type.leading);
@@ -913,7 +921,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       const paint = gradientPaint(type.gradient,cx,cy,faceWidth,faceHeight);
       filter.push([canvas,...shadow,...draw].join(',')+`[under${i}]`);
       filter.push([canvas,...mask,'alphaextract'].join(',')+`[mask${i}]`);
-      filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=1,format=gbrp,${paint},loop=loop=${visibleLength-1}:size=1:start=0,setpts=N/(${fps}*TB)[paint${i}]`);
+      filter.push([`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=1,format=gbrp`,paint,...holdFrame(rasterFrames)].join(',')+`[paint${i}]`);
       filter.push(`[paint${i}][mask${i}]alphamerge[face${i}]`);
       filter.push(`[under${i}][face${i}]overlay=format=auto:shortest=1,${finish}[title${i}]`);
     } else {

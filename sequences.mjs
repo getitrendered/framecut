@@ -34,6 +34,11 @@ export function exportRange(sequence, total) {
   return { start, end, frames: Math.max(0, end - start) };
 }
 
+export function exportWindow(range, total) {
+  // Keep neighboring frames around the cut for audio limiter lookahead and release.
+  return { start:Math.max(0,range.start-2), end:Math.min(total,range.end+2) };
+}
+
 export function formatRatio(width, height) {
   let a = width;
   let b = height;
