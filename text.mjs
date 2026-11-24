@@ -1,3 +1,5 @@
+import { presets, properties, valueAt } from './motion.mjs';
+
 export const fontFamilies = {
   'Segoe UI': ['segoeui.ttf','segoeuib.ttf','segoeuii.ttf','segoeuiz.ttf'],
   Arial: ['arial.ttf','arialbd.ttf','ariali.ttf','arialbi.ttf'],
@@ -15,6 +17,59 @@ export const textPresets = {
   'Equation callout': { text:'E = mc²', style:'center', type:{ family:'Cambria',size:9,weight:2,outline:0 } },
   'Citation lower third': { text:'Author (Year)\nSource or paper title', style:'lower', type:{ family:'Georgia',size:4.4,align:'left',weight:0,background:'#19242d',boxOpacity:90,padding:15 } }
 };
+
+function phase(name, reverse = false) {
+  const tracks = presets.find(row=>row[0]===name)[2];
+  const times = Object.values(tracks).flatMap(keys=>keys.map(([time])=>time));
+  const start = Math.min(...times), end = Math.max(...times);
+  return Object.fromEntries(Object.entries(tracks).map(([key,keys])=>{
+    const normal = properties[key][3];
+    const points = [[0,keys[0][1]],...keys.map(([time,value])=>[(time-start)/(end-start),value]),[1,keys.at(-1)[1]]];
+    if (!reverse) return [key,points];
+    return [key,[[0,normal],...points.reverse().map(([time,value])=>[1-time,value])]];
+  }));
+}
+
+export const textListEntrances = {
+  cut:['Cut',{}],
+  fade:['Fade in',phase('Fade in')],
+  pop:['Pop in',phase('Pop in')],
+  left:['Slide from left',phase('Slide from left')],
+  right:['Slide from right',phase('Slide from right')],
+  rise:['Rise in',phase('Rise')],
+  drop:['Drop in',phase('Drop in')],
+  wipe:['Wipe right',phase('Wipe right')],
+  type:['Typewriter',{reveal:[[0,0],[1,100]]}]
+};
+
+export const textListExits = {
+  cut:['Cut',{}],
+  fade:['Fade out',phase('Fade out')],
+  pop:['Pop out',phase('Pop out')],
+  left:['Slide left',phase('Slide from left',true)],
+  right:['Slide right',phase('Slide from right',true)],
+  rise:['Rise out',phase('Drop in',true)],
+  drop:['Drop out',phase('Rise',true)],
+  wipe:['Wipe left',phase('Wipe right',true)],
+  erase:['Erase text',{reveal:[[0,100],[1,0]]}]
+};
+
+export function textListMotion({entrance,exit,enterFrames,holdFrames,exitFrames}) {
+  const motion = {};
+  for (const [tracks, start, length] of [
+    [textListEntrances[entrance][1],0,enterFrames],
+    [textListExits[exit][1],enterFrames+holdFrames,exitFrames]
+  ]) {
+    if (!length) continue;
+    for (const [key,keys] of Object.entries(tracks)) {
+      const track = new Map(motion[key] || []);
+      if (start && !track.size) track.set(0,properties[key][3]);
+      for (const [at,value] of keys) track.set(start+Math.round(at*(length-1)),value);
+      motion[key] = [...track];
+    }
+  }
+  return motion;
+}
 
 export function titleType(title) {
   const type = title.type || {};
@@ -47,8 +102,7 @@ export function titleType(title) {
 export function typographyText(text, type) {
   let result = type.case === 'upper' ? text.toLocaleUpperCase() : type.case === 'lower' ? text.toLocaleLowerCase() : text;
   if (!type.tracking) return result;
-  return result.split('\n').map(line => [...new Intl.Segmenter(undefined,{granularity:'grapheme'}).segment(line)]
-    .map(part => part.segment).join('\u200a'.repeat(type.tracking))).join('\n');
+  return result.split('\n').map(line => textCharacters(line).join('\u200a'.repeat(type.tracking))).join('\n');
 }
 
 export function wrapText(text, max) {
@@ -67,12 +121,20 @@ export function wrapText(text, max) {
   return lines.join('\n');
 }
 
+const graphemes = new Intl.Segmenter(undefined,{granularity:'grapheme'});
+export const textCharacters = text => Array.from(graphemes.segment(text),part=>part.segment);
+export const typewriterStep = (frames,count) => Math.max(1,Math.ceil(frames*.65/count));
+export const textFragment = (chars,count,step) => chars.slice(0,Math.ceil(step*chars.length/count)).join('');
+export const usesTextReveal = title => Array.isArray(title.motion?.reveal) && title.motion.reveal.length>0;
+
 export function visibleText(title, frame) {
-  const chars = [...title.text];
-  if (!title.typewriter) return title.text;
+  const reveal = usesTextReveal(title);
+  if (!reveal && !title.typewriter) return title.text;
+  const chars = textCharacters(title.text);
   const count = Math.min(chars.length,24);
-  const step = Math.max(1,Math.ceil(title.len*.65/count));
-  return chars.slice(0,Math.ceil((Math.floor(frame/step)+1)*chars.length/count)).join('');
+  if (!count) return '';
+  const step = reveal ? Math.ceil(valueAt(title,'reveal',frame)*count/100) : Math.floor(frame/typewriterStep(title.len,count))+1;
+  return textFragment(chars,count,step);
 }
 
 export function readSrt(input, rate = 30) {

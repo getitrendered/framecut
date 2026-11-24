@@ -1,10 +1,10 @@
 import { canvasSize, looks, points, presets, properties, resizeMotion, valueAt } from '/motion.mjs';
-import { fontFamilies, readSrt, textPresets, titleType, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
+import { fontFamilies, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleType, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
 import { soundPresets, soundSettings, soundWave } from '/sound.mjs';
 import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs';
 import { setupUpdates } from '/updates-ui.mjs';
 import { changesLockedClips, clipMix, clipsIn, gainDb, protectedTrack, trackOf, trackSettings } from '/tracks.mjs';
-import { contentDuration, exportRange, sequenceDuration, sequenceSize } from '/sequences.mjs';
+import { contentDuration, exportRange, MAX_DURATION, sequenceDuration, sequenceSize } from '/sequences.mjs';
 import { catalogKey, compositionType, projectControls, readCatalog } from '/projects.mjs';
 import { createLedWorkspace } from '/led.mjs';
 import '/layout.mjs';
@@ -803,6 +803,169 @@ function addTitle(preset, caption=false) {
   $('title-text')?.select();
 }
 
+function setupTextList() {
+  const dialog = $('text-list-dialog');
+  const form = $('text-list-form');
+  const input = $('text-list-input');
+  const numbers = $('text-list-numbers');
+  const track = $('text-list-track');
+  const style = $('text-list-style');
+  const enter = $('text-list-enter');
+  const exit = $('text-list-exit');
+  const enterTime = $('text-list-enter-time');
+  const holdTime = $('text-list-hold');
+  const exitTime = $('text-list-exit-time');
+  const status = $('text-list-status');
+  const play = $('text-list-play');
+  const sample = $('text-list-preview-title');
+  const sampleLayer = $('text-list-preview-layer');
+  const stage = $('text-list-stage');
+  const add = $('text-list-add');
+  for (const [select,options] of [[enter,textListEntrances],[exit,textListExits]]) {
+    for (const [value,[label]] of Object.entries(options)) select.add(new Option(label,value));
+    select.value = 'fade';
+  }
+  let styleSource;
+  let lineCount = 0;
+  let animation = 0;
+  let previewItems = [];
+
+  function plan() {
+    const timing = {
+      entrance:enter.value, exit:exit.value,
+      enterFrames:enterTime.disabled ? 0 : Math.round(enterTime.valueAsNumber*fps),
+      holdFrames:Math.round(holdTime.valueAsNumber*fps),
+      exitFrames:exitTime.disabled ? 0 : Math.round(exitTime.valueAsNumber*fps)
+    };
+    const frames = [timing.enterFrames,timing.holdFrames,timing.exitFrames];
+    const len = frames.reduce((sum,count)=>sum+count,0);
+    const validTime = frames.every(count=>Number.isSafeInteger(count) && count>=0 && count<=MAX_DURATION) && len>0;
+    const lines = input.value.split('\n');
+    const items = lines.map(line=>cleanText(line,901)).filter(Boolean);
+    const matchStyle = style.value==='selected' && styleSource;
+    const template = {
+      style:matchStyle ? styleSource.style : style.value,
+      ...(matchStyle && styleSource.type ? {type:styleSource.type} : {}),
+      len,motion:validTime ? textListMotion(timing) : {}
+    };
+    const layer = Number(track.value);
+    const total = len*items.length;
+    const start = validTime && items.length ? freeStart(
+      project.titles.filter(item=>item.style!=='caption' && (item.track || 1)===layer),cursor,total) : cursor;
+    let error = '';
+    if (!validTime) error = 'Enter at least one frame of total duration.';
+    else if (items.length>500) error = 'Add up to 500 titles at a time.';
+    else if (items.some(text=>text.length>900)) error = 'Keep each title to 900 characters or fewer.';
+    else if (!layer || protectedTrack(project,`title:${layer}`)) error = 'Choose an unlocked title layer.';
+    else if (start+total>(project.fixedFrames || MAX_DURATION)) error = project.fixedFrames ?
+      `The list runs past the fixed end at ${timecode(project.fixedFrames)}. Shorten the timing or change the timeline duration.` :
+      'The list would extend the timeline past 24 hours.';
+    return { timing,template,items,lineCount:lines.length,layer,total,start,error };
+  }
+
+  function showPreview(frame) {
+    const title = previewItems[Math.floor(frame/(previewItems[0]?.len || 1))];
+    sampleLayer.hidden = !title;
+    if (!title) return;
+    const local = frame%title.len;
+    styleTitle(sample,title,local,stage);
+    styleMotion(sampleLayer,title,local);
+  }
+
+  function stopPreview() {
+    cancelAnimationFrame(animation);
+    animation = 0;
+    play.textContent = 'Play preview';
+  }
+
+  function update() {
+    enterTime.disabled = enter.value==='cut';
+    exitTime.disabled = exit.value==='cut';
+    const sequence = plan();
+    if (lineCount!==sequence.lineCount) {
+      lineCount = sequence.lineCount;
+      numbers.textContent = Array.from({length:Math.min(501,lineCount)},(_,i)=>i+1).join('\n');
+    }
+    numbers.scrollTop = input.scrollTop;
+    const count = sequence.items.length;
+    add.disabled = !count || Boolean(sequence.error);
+    status.toggleAttribute('data-error',Boolean(sequence.error));
+    status.textContent = sequence.error || (count ? `${count} ${count===1?'title':'titles'} · ${timecode(sequence.total)} · Starts at ${timecode(sequence.start)}` : 'Enter titles to build a sequence.');
+    stopPreview();
+    const examples = count ? sequence.items.slice(0,2) : ['Your first title','Your next title'];
+    previewItems = Number.isInteger(sequence.template.len) && sequence.template.len>0 ?
+      examples.map(text=>({...sequence.template,text:text.slice(0,900)})) : [];
+    play.disabled = !previewItems.length;
+    showPreview(Math.min(sequence.timing.enterFrames,(previewItems[0]?.len ?? 1)-1));
+  }
+  play.onclick = () => {
+    if (animation) {
+      update();
+      return;
+    }
+    let started;
+    const total = previewItems.length*previewItems[0].len;
+    play.textContent = 'Stop preview';
+    const tick = now => {
+      started ??= now;
+      const frame = Math.floor((now-started)*fps/1000);
+      if (frame>=total || !dialog.open) return update();
+      showPreview(frame);
+      animation = requestAnimationFrame(tick);
+    };
+    animation = requestAnimationFrame(tick);
+  };
+  input.onscroll = () => { numbers.scrollTop = input.scrollTop; };
+  form.addEventListener('input',update);
+  $('text-list-close').onclick = () => dialog.close();
+  dialog.addEventListener('close',stopPreview);
+  form.onsubmit = event => {
+    event.preventDefault();
+    const { template,items,layer,start,error } = plan();
+    if (error || !items.length) return update();
+    const clips = items.map((text,index)=>({
+      ...structuredClone(template),id:id(),track:layer,text,start:start+index*template.len
+    }));
+    if (!change(()=>{
+      project.titleLayers = Math.max(project.titleLayers,layer);
+      project.titles.push(...clips);
+      selected = clips[0].id;
+    })) return;
+    dialog.close();
+    input.value = '';
+    setPosition(start);
+    revealCursor();
+    notify(`Added ${clips.length} ${clips.length===1?'title':'titles'} from Text List`);
+  };
+
+  return () => {
+    pause();
+    const [width,height] = sequenceSize(project);
+    stage.style.setProperty('--text-list-ratio',width/height);
+    const clip = selection();
+    styleSource = clip && !clip.asset && clip.style!=='caption' ? clip : null;
+    style.querySelector('[value=selected]').hidden = !styleSource;
+    if (!styleSource && style.value==='selected') style.value = 'center';
+    const [kind,number] = (selectedTrack || '').split(':');
+    const preferred = kind==='title' ? Number(number) : styleSource?.track || project.titleLayers;
+    track.replaceChildren();
+    for (let layer=1;layer<=project.titleLayers;layer++) {
+      const settings = trackSettings(project,`title:${layer}`);
+      const option = new Option((settings.name || `Titles ${layer}`)+(settings.locked?' (locked)':settings.muted?' (hidden)':''),layer);
+      option.disabled = Boolean(settings.locked);
+      track.add(option);
+    }
+    if (project.titleLayers<4) track.add(new Option('New title layer',project.titleLayers+1));
+    track.value = [...track.options].find(option=>Number(option.value)===preferred && !option.disabled)?.value ??
+      [...track.options].find(option=>!option.disabled)?.value ?? '';
+    dialog.showModal();
+    update();
+    input.focus();
+  };
+}
+
+const openTextList = setupTextList();
+
 function selection() {
   return clipsIn(project).find(clip => clip.id === selected);
 }
@@ -1215,7 +1378,7 @@ function renderInspector() {
   if (clip.kind!=='audio' && (page === 'animation' || page === 'color')) {
     const keys = page === 'color' ? ['brightness', 'contrast', 'saturation'] : Object.keys(properties);
     panel.append(node('h2', '', page === 'color' ? 'Color controls' : 'Keyframes'));
-    for (const key of keys) panel.append(keyControl(clip, key));
+    for (const key of keys) if (!clip.asset || key!=='reveal') panel.append(keyControl(clip, key));
   }
 }
 
@@ -1273,7 +1436,7 @@ function layerItems(clip) {
     : project.titles.filter(item => (item.track || 1) === (clip.track || 1));
 }
 
-function cleanText(text) { return text.replace(/\r\n?/g,'\n').replace(/\t/g,' ').replace(/[^\P{Cc}\n]/gu,'').trim().slice(0,900); }
+function cleanText(text, limit=900) { return text.replace(/\r\n?/g,'\n').replace(/\t/g,' ').replace(/[^\P{Cc}\n]/gu,'').trim().slice(0,limit); }
 
 function choice(label, options, value, update) {
   const input=node('select');
@@ -1620,7 +1783,10 @@ function applyEffect(name, clip = selection()) {
       for (const [key, value] of Object.entries(look[1])) clip.motion[key] = [[0, value]];
       clip.gradeLabel = look[0];
     }
-    if (name === 'Typewriter') clip.typewriter = true;
+    if (name === 'Typewriter') {
+      delete clip.motion.reveal;
+      clip.typewriter = true;
+    }
   });
   notify(`Applied ${name}`);
 }
@@ -1716,7 +1882,8 @@ function renderTools() {
     const animation=group('Text animations',animations);
     animation.classList.add('text-animations');
     animation.open=previous.get('Text animations') ?? true;
-    tools.append(button('Add text',()=>addTitle()),button('Add caption',()=>addTitle(undefined,true)),
+    tools.append(button('Text List…',openTextList,Boolean(project.timelineLocked)),
+      button('Add text',()=>addTitle()),button('Add caption',()=>addTitle(undefined,true)),
       button('Save SRT',()=>void saveSubtitles(),!project.titles.some(item=>item.style==='caption')),
       language,button(transcribing?'Transcribing…':'Auto-detect subtitles',()=>void autoCaptions(),!transcriptionAvailable || transcribing || !duration));
     if(!transcriptionAvailable) tools.append(node('p','subtle','The offline speech model is unavailable in this build.'));
@@ -2273,6 +2440,7 @@ function renderKeyLanes() {
   const clip = selection();
   if (!clip || page !== 'animation') return;
   for (const key of Object.keys(properties)) {
+    if (clip.asset && key==='reveal') continue;
     if (!clip.motion?.[key]?.length) continue;
     $('track-labels').append(trackLabel(properties[key][0].replace(/ \(.+\)/,''), 'track-key'));
     const lane = node('div', 'lane key-lane');
@@ -2565,12 +2733,13 @@ function display(frame, seek = false) {
   updateKeyControls();
 }
 
-function styleTitle(label,title,offset) {
+function styleTitle(label,title,offset,stage=$('stage')) {
   const type=titleType(title);
-  const size=$('stage').clientHeight*type.size/100;
-  const columns=Math.max(12,Math.floor($('stage').clientWidth*.84/Math.max(1,size*(.56+type.tracking*.08))));
+  const size=stage.clientHeight*type.size/100;
+  const columns=Math.max(12,Math.floor(stage.clientWidth*.84/Math.max(1,size*(.56+type.tracking*.08))));
   const wrapped=wrapText(title.text,columns);
   label.textContent=typographyText(visibleText({...title,text:wrapped},offset),type);
+  label.hidden = !label.textContent;
   const longest=Math.max(1,...wrapped.split('\n').map(row=>[...row].length));
   label.style.fontSize=`min(${type.size}cqh, ${86/(longest*(.56+type.tracking*.08))}cqw)`;
   label.style.fontFamily=`"${type.family}", sans-serif`;

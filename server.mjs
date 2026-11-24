@@ -11,7 +11,7 @@ import { homedir } from 'node:os';
 import { expression, points, properties } from './motion.mjs';
 import { exportRange, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
-import { fontFamilies, titleType, typographyText, wrapText } from './text.mjs';
+import { fontFamilies, textCharacters, textFragment, titleType, typewriterStep, typographyText, usesTextReveal, wrapText } from './text.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
 import { clipMix, trackOf, trackSettings } from './tracks.mjs';
@@ -764,7 +764,8 @@ async function render(job, project, timeline) {
     const audioEncoding = ['-c:a',webm?'libopus':'aac','-b:a',bitrate];
     const muxOptions = webm ? [] : ['-movflags','+faststart'];
     const output = `video.${job.format}`;
-    const inputs = [...timeline.clips,...timeline.overlays,...timeline.sounds];
+    const titles = timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
+    const inputs = [...timeline.clips,...timeline.overlays,...timeline.sounds,...titles];
     const stage = job.composition ? 'Rendering composition' : 'Rendering video';
     const report = (done, ceiling) => {
       job.progress = Math.min(ceiling,Math.round(done/range.frames*ceiling));
@@ -812,7 +813,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
   for (const [i, clip] of clips.entries()) {
     if(clip.start>previous) gap(clip.start-previous);
     addRenderInput(args,clip,batch);
-    const effects = Object.keys(properties).some(key => changed(clip,key));
+    const effects = Object.keys(properties).some(key => key!=='reveal' && changed(clip,key));
     videoStream(filter, clip, i, width,height, effects, `vs${i}`);
     if (effects) {
       filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${clip.len}[black${i}]`);
@@ -862,22 +863,26 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     const units=height/1080;
     const maxColumns=Math.max(12,Math.floor(width*.84/(size*(.56+type.tracking*.08))));
     const wrapped=wrapText(title.text,maxColumns);
-    const chars = [...wrapped];
-    const count = title.typewriter ? Math.min(chars.length, 24) : 1;
+    const chars = textCharacters(wrapped);
+    const reveal = usesTextReveal(title);
+    const count = reveal || title.typewriter ? Math.min(chars.length,24) : 1;
     const sourceLength = title.sourceLength ?? title.len;
     const localFrame = title.sectionOffset ? `(n+${title.sectionOffset})` : 'n';
-    const step = Math.max(1, Math.ceil(sourceLength * .65 / count));
+    const progress = reveal ? expression(title,'reveal',localFrame) : '';
+    const step = typewriterStep(sourceLength,count);
     const longest=Math.max(1,...wrapped.split('\n').map(row=>[...row].length));
     const fontSize=Math.max(8,Math.round(Math.min(size,width*.86/(longest*(.56+type.tracking*.08)))));
     const x=type.align==='left' ? 'w*0.075' : type.align==='right' ? 'w*0.925-tw' : '(w-tw)/2';
     const y=title.style==='caption' ? 'h*0.91-th' : title.style==='lower' ? 'h*0.87-th' : '(h-th)/2';
     const draw=[], shadow=[];
     const color=(hex,alpha=100)=>`0x${hex.slice(1)}@${(alpha/100).toFixed(3)}`;
-    for (let part = 0; part < count && part * step < sourceLength; part++) {
+    for (let part = 0; part < count && (reveal || part*step<sourceLength); part++) {
       const file = `title-${i}-${part}.txt`;
-      await writeFile(join(folder,file),typographyText(chars.slice(0,Math.ceil((part + 1)*chars.length/count)).join(''),type));
+      await writeFile(join(folder,file),typographyText(textFragment(chars,count,part+1),type));
       const limit = part + 1 === count ? sourceLength : (part + 1) * step;
-      const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}:enable='gte(${localFrame},${part*step})*lt(${localFrame},${limit})'`;
+      const enable = reveal ? `gt(${progress},${part*100/count})*lte(${progress},${(part+1)*100/count})`
+        : `gte(${localFrame},${part*step})*lt(${localFrame},${limit})`;
+      const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}:enable='${enable}'`;
       if(type.shadow) shadow.push(`${base}:fontcolor=black@${type.shadow/100}:x=(${x})+(${Math.round(type.shadowX*units)}):y=(${y})+(${Math.round(type.shadowY*units)})`);
       const box=type.boxOpacity ? `:box=1:boxcolor=${color(type.background,type.boxOpacity)}:boxborderw=${Math.round(type.padding*units)}` : '';
       if(box && type.depth) draw.push(`${base}:fontcolor=white@0:x=${x}:y=${y}${box}`);
@@ -1026,12 +1031,12 @@ const routes = {
   '/graphics.mjs': ['graphics.mjs','text/javascript; charset=utf-8']
 };
 
-async function requestJson(req) {
+async function requestJson(req, limit=1_000_000) {
   let body = '';
   req.setEncoding('utf8');
   for await (const chunk of req) {
     body += chunk;
-    if (body.length > 1_000_000) throw new Error('This request is too large.');
+    if (body.length > limit) throw new Error('This request is too large.');
   }
   return JSON.parse(body);
 }
@@ -1098,7 +1103,7 @@ const server = createServer(async (req, res) => {
       }
       if (path === '/api/exports' || path === '/api/compositions') {
         const composition = path === '/api/compositions';
-        const request = await requestJson(req);
+        const request = await requestJson(req,8_000_000);
         const project = composition ? { ...request, markIn:null, markOut:null, quality:'high' } : request;
         const timeline = readTimeline(project);
         if (!composition && [...exports.values()].some(job => !job.composition && job.status === 'rendering')) {

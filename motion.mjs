@@ -13,6 +13,7 @@ export const properties = {
   scale: ['Scale (%)', 5, 300, 100],
   rotation: ['Rotation (°)', -360, 360, 0],
   opacity: ['Opacity (%)', 0, 100, 100],
+  reveal: ['Text reveal (%)', 0, 100, 100],
   brightness: ['Brightness (%)', 0, 200, 100],
   contrast: ['Contrast (%)', 0, 200, 100],
   saturation: ['Saturation (%)', 0, 300, 100],
