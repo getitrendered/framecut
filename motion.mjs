@@ -35,6 +35,11 @@ export const videoStretch = value => Number.isFinite(value) ? Math.max(5,Math.mi
 export const hasVideoFraming = clip => Object.hasOwn(videoFitModes,clip.fit) ||
   videoStretch(clip.stretchWidth)!==100 || videoStretch(clip.stretchHeight)!==100;
 
+export function titlePositionOffset(clip,axis) {
+  const value = clip.position?.[axis];
+  return !clip.asset && Number.isFinite(value) ? Math.max(-200,Math.min(200,value)) : 0;
+}
+
 export function fittedVideoSize(mode, aspect, width, height) {
   if (mode==='stretch') return [width,height];
   if (mode==='width' || (mode==='contain' && aspect>=width/height)) return [width,width/aspect];

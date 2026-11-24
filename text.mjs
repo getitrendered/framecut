@@ -169,7 +169,8 @@ export function wrapText(text, max) {
 
 const graphemes = new Intl.Segmenter(undefined,{granularity:'grapheme'});
 export const textCharacters = text => Array.from(graphemes.segment(text),part=>part.segment);
-export const typewriterStep = (frames,count) => Math.max(1,Math.ceil(frames*.65/count));
+export const typewriterSteps = chars => Math.min(chars.length,60);
+export const typewriterDuration = frames => Math.max(1,Math.round(frames*.65));
 export const textFragment = (chars,count,step) => chars.slice(0,Math.ceil(step*chars.length/count)).join('');
 export const usesTextReveal = title => Array.isArray(title.motion?.reveal) && title.motion.reveal.length>0;
 
@@ -177,10 +178,18 @@ export function visibleText(title, frame) {
   const reveal = usesTextReveal(title);
   if (!reveal && !title.typewriter) return title.text;
   const chars = textCharacters(title.text);
-  const count = Math.min(chars.length,24);
+  const count = typewriterSteps(chars);
   if (!count) return '';
-  const step = reveal ? Math.ceil(valueAt(title,'reveal',frame)*count/100) : Math.floor(frame/typewriterStep(title.len,count))+1;
+  const progress = reveal ? valueAt(title,'reveal',frame) : Math.min(100,(frame+1)*100/typewriterDuration(title.len));
+  const step = Math.ceil(progress*count/100);
   return textFragment(chars,count,step);
+}
+
+export function titleVerticalAnchor(title) {
+  if (title.verticalAlign==='top') return 0;
+  if (title.verticalAlign==='middle') return .5;
+  if (title.verticalAlign==='bottom') return 1;
+  return title.style==='center'?.5:1;
 }
 
 export function readSrt(input, rate = 30) {

@@ -1,5 +1,5 @@
-import { canvasSize, fittedVideoSize, hasVideoFraming, looks, points, presets, properties, resizeMotion, valueAt, videoFit, videoFitModes, videoStretch } from '/motion.mjs';
-import { customGradientStops, extrusionOffsets, fontFamilies, maxExtrusionDepth, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleMaterials, titleType, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
+import { canvasSize, fittedVideoSize, hasVideoFraming, looks, points, presets, properties, resizeMotion, titlePositionOffset, valueAt, videoFit, videoFitModes, videoStretch } from '/motion.mjs';
+import { customGradientStops, extrusionOffsets, fontFamilies, maxExtrusionDepth, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleMaterials, titleType, titleVerticalAnchor, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
 import { soundPresets, soundSettings, soundWave } from '/sound.mjs';
 import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs';
 import { setupUpdates } from '/updates-ui.mjs';
@@ -10,6 +10,7 @@ import { createLedWorkspace } from '/led.mjs';
 import '/layout.mjs';
 const $ = id => document.getElementById(id);
 const fps = 30;
+const mixed = Symbol('mixed');
 const installedFonts = new Set(Object.keys(fontFamilies));
 const mediaDragType = 'application/x-framecut-asset';
 const importedAudioDragType = 'application/x-framecut-audio-asset';
@@ -106,6 +107,8 @@ let soundContext;
 let auditionNode;
 const audioPlayers = new Map();
 let placingText=false;
+let positioningTitles=false;
+let cancelTitleDrag;
 const previewAnimations=new WeakMap();
 const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)');
 const previewObserver=new IntersectionObserver(entries=>{
@@ -383,7 +386,7 @@ const controls = projectControls({
 });
 
 async function materialize(item, sequence = item.sequence) {
-  const payload = { ...sequence, markIn:null, markOut:null, folders:undefined, assignments:undefined, gradeReference:undefined };
+  const payload = { ...sequence, markIn:null, markOut:null, folders:undefined, assignments:undefined, gradeReference:undefined, canvasMargins:undefined };
   const body = JSON.stringify(payload);
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
   const revision = Array.from(new Uint8Array(digest), value=>value.toString(16).padStart(2,'0')).join('');
@@ -534,7 +537,7 @@ function change(update) {
 function history(from, to) {
   if (!from.length) return;
   const next = { ...from.at(-1), timelineLocked:project.timelineLocked, trackSettings:project.trackSettings,
-    masterMuted:project.masterMuted, masterGainDb:project.masterGainDb };
+    masterMuted:project.masterMuted, masterGainDb:project.masterGainDb, canvasMargins:project.canvasMargins };
   if (project.timelineLocked || changesLockedClips(project,next)) {
     notify('Unlock the affected tracks to change edit history.');
     return;
@@ -942,14 +945,22 @@ function insertVideo(assetId, index, dropStart, composition) {
   return clip;
 }
 
-function addTitle(preset, caption=false) {
-  const len = 3 * fps;
+function addTitle(preset, caption=false, onCanvas=false) {
+  const len = onCanvas && project.fixedFrames ? Math.min(3*fps,project.fixedFrames-cursor) : 3*fps;
+  if (len<1) return;
   const active = selection();
-  const track = caption ? 5 : active && !active.asset && active.style !== 'caption' ? active.track || 1 : project.titleLayers;
+  let track = caption ? 5 : active && !active.asset && active.style !== 'caption' ? active.track || 1 : project.titleLayers;
+  const at = layer=>freeStart(project.titles.filter(item=>(item.track || 1)===layer),cursor,len);
+  if (onCanvas && (protectedTrack(project,`title:${track}`) || at(track)!==cursor)) {
+    const layers = Array.from({length:4},(_,i)=>i+1);
+    track = layers.find(layer=>!protectedTrack(project,`title:${layer}`) && at(layer)===cursor);
+    if (!track) return notify('Free or unlock a title layer at the playhead to add text here.');
+  }
   if(!guardTrack(caption?'caption:5':`title:${track}`)) return;
   const clip = { id: id(), track, text: caption ? 'Your caption' : 'Your title', style:caption ? 'caption' : 'center',
-    ...preset, start:freeStart(project.titles.filter(item => (item.track || 1) === track),cursor,len), len };
+    ...preset, start:at(track), len };
   change(() => {
+    if (onCanvas) project.titleLayers = Math.max(project.titleLayers,track);
     project.titles.push(clip);
     selected = clip.id;
   });
@@ -975,18 +986,21 @@ function fillFontMenu(menu,value,inherit=false) {
     menu.append(fontOptions.cloneNode(true));
     menu.fontOptions = fontOptions;
   }
+  if (menu.firstElementChild?.hasAttribute('data-mixed-value')) menu.firstElementChild.remove();
   const unavailable = menu.lastElementChild;
   if (unavailable?.hasAttribute('data-unavailable-font')) unavailable.remove();
-  if (value && !installedFonts.has(value)) {
+  if (value===mixed) addMixedOption(menu);
+  else if (value && !installedFonts.has(value)) {
     const option = new Option(value+' (unavailable)',value);
     option.dataset.unavailableFont = '';
     menu.add(option);
   }
-  menu.value = value;
+  menu.value = value===mixed ? '' : value;
 }
 
 function fillMaterialMenu(menu, value, inherit = false) {
   if (inherit) menu.add(new Option('From title style','inherit'));
+  if (value===mixed) addMixedOption(menu);
   menu.add(new Option('Solid color','solid'));
   menu.add(new Option('Custom gradient','custom'));
   const groups = new Map();
@@ -999,7 +1013,7 @@ function fillMaterialMenu(menu, value, inherit = false) {
     }
     groups.get(material.group).append(new Option(material.label,key));
   }
-  menu.value = value;
+  menu.value = value===mixed ? '' : value;
 }
 
 function setupTextList() {
@@ -1214,6 +1228,15 @@ function selection() {
 
 const isSelected = key => selected===key || selectedGroup.has(key);
 const selectedClips = () => clipsIn(project).filter(clip=>isSelected(clip.id));
+const selectedTitles = () => project.titles.filter(clip=>isSelected(clip.id));
+
+function selectAllTitles() {
+  const [first,...others] = sortedTitles();
+  if (!first) return;
+  selected = selectionAnchor = first.id;
+  selectedGroup = new Set(others.map(clip=>clip.id));
+  refreshSelection();
+}
 
 function clipList(clip) {
   return clip.kind === 'audio' ? project.sounds : clip.asset ? (clip.track ? project.overlays : project.clips) : project.titles;
@@ -1261,6 +1284,7 @@ function drawClipSelection(preview) {
 }
 
 function refreshSelection() {
+  stopTitlePosition();
   const clip=selection();
   if(clip) selectTrack(trackOf(clip));
   drawClipSelection();
@@ -1269,6 +1293,9 @@ function refreshSelection() {
   renderTools();
   refreshTrackControls();
   updateButtons();
+  for (const label of $('preview-titles').querySelectorAll('[data-preview-title]')) {
+    label.classList.toggle('canvas-selected',isSelected(label.dataset.previewTitle));
+  }
 }
 
 function selectTrack(key) {
@@ -1536,12 +1563,27 @@ function timeField(label, frames, low, high, update) {
 
 function renderInspector() {
   const panel = $('inspector');
+  const batchScroll = panel.querySelector('[data-title-batch]') ? panel.scrollTop : 0;
   const openGroups=new Set([...panel.querySelectorAll('details[open] summary')].map(summary=>summary.textContent));
   const transformOpen = panel.querySelector('.video-transform')?.open ?? true;
   panel.replaceChildren();
   const clip = selection();
   if (!clip) {
     panel.append(node('p', 'subtle', 'Select a video or title on the timeline to edit its properties.'));
+    return;
+  }
+  const titles = selectedGroup.size ? selectedTitles() : [];
+  if (titles.length>1) {
+    panel.append(node('h2','',`${titles.length} text clips selected`));
+    const hint = node('p','subtle','Unlock the selected text tracks to edit them together.');
+    hint.dataset.titleBatchLock = '';
+    hint.hidden = true;
+    const batch = node('fieldset','title-batch');
+    batch.dataset.titleBatch = '';
+    renderTitlePosition(batch,titles);
+    renderTypography(batch,titles,openGroups);
+    panel.append(hint,batch);
+    panel.scrollTop = batchScroll;
     return;
   }
   if (clip.kind === 'audio') {
@@ -1597,14 +1639,6 @@ function renderInspector() {
     text.rows=4;
     text.value = clip.text;
     text.onchange = () => change(() => { clip.text = cleanText(text.value) || clip.text; });
-    const style = node('select');
-    for (const [value, label] of clip.style==='caption' ? [['caption','Caption']] : [['center', 'Centered'], ['lower', 'Lower third']]) {
-      const option = node('option', '', label);
-      option.value = value;
-      style.add(option);
-    }
-    style.value = clip.style;
-    style.onchange = () => change(() => { clip.style = style.value; });
     const maxEnd = laneNeighbors(clip).next;
     const maxFrame = Math.max(duration + 3600 * fps, clip.start + clip.len);
     const timing = node('div', 'property-line');
@@ -1620,10 +1654,11 @@ function renderInspector() {
       clip.track = Number(layer.value);
       clip.start = freeStart(layerItems(clip), clip.start, clip.len, clip.id);
     });
-    panel.append(field(clip.style==='caption' ? 'Caption' : 'Text', text),field('Position',style));
+    panel.append(field(clip.style==='caption' ? 'Caption' : 'Text',text));
+    renderTitlePosition(panel,[clip]);
     if(clip.style!=='caption') panel.append(field('Title layer',layer));
     panel.append(timing);
-    if(page==='text') renderTypography(panel,clip,openGroups);
+    if(page==='text') renderTypography(panel,[clip],openGroups);
     else panel.append(button('Open Text & Subtitles',()=>switchPage('text')));
   }
   if (clip.kind!=='audio' && (page === 'animation' || page === 'color')) {
@@ -1692,28 +1727,49 @@ function layerItems(clip) {
 
 function cleanText(text, limit=900) { return text.replace(/\r\n?/g,'\n').replace(/\t/g,' ').replace(/[^\P{Cc}\n]/gu,'').trim().slice(0,limit); }
 
+function addMixedOption(input) {
+  const option = new Option('Mixed','');
+  option.disabled = true;
+  option.dataset.mixedValue = '';
+  input.add(option,0);
+}
+
+function commonValue(items, read) {
+  const first = read(items[0]);
+  return items.every(item=>read(item)===first) ? first : mixed;
+}
+
 function choice(label, options, value, update) {
   const input=node('select');
+  if (value===mixed) addMixedOption(input);
   for(const [key,name] of options) input.add(new Option(name,key));
-  input.value=String(value);
+  input.value=value===mixed?'':String(value);
   input.onchange=()=>update(input.value);
   return field(label,input);
 }
 
 function numberControl(label, value, min, max, step, update) {
   const input=node('input');
-  input.type='number'; input.min=min; input.max=max; input.step=step; input.value=value;
+  input.type='number'; input.min=min; input.max=max; input.step=step; input.value=value===mixed?'':value;
+  if (value===mixed) input.placeholder = 'Mixed';
   input.onchange=()=>{
-    if(!Number.isFinite(input.valueAsNumber)){ input.value=value; return; }
+    if(!Number.isFinite(input.valueAsNumber)){ input.value=value===mixed?'':value; return; }
     update(clamp(input.valueAsNumber,min,max));
   };
   return field(label,input);
 }
 
 function colorControl(label, value, update) {
-  const input=node('input'); input.type='color'; input.value=value;
+  const input=node('input'); input.type='color'; input.value=value===mixed?'#ffffff':value;
   input.onchange=()=>update(input.value);
-  return field(label,input);
+  const control = field(label,input);
+  if (value!==mixed) return control;
+  control.firstElementChild.textContent += ' · Mixed';
+  const apply = button('Apply',()=>update(input.value));
+  apply.setAttribute('aria-label',`Apply ${label.toLowerCase()} to selection`);
+  const pair = node('div','mixed-color-control');
+  pair.append(control,apply);
+  return pair;
 }
 
 function group(label, ...children) {
@@ -1724,13 +1780,127 @@ function group(label, ...children) {
   return details;
 }
 
-function renderTypography(panel, clip,openGroups) {
-  const type=titleType(clip);
-  const set=(key,value)=>change(()=>{ (clip.type ||= {})[key]=value; });
-  const n=(key,label,min,max,step=1)=>numberControl(label,type[key],min,max,step,value=>set(key,value));
-  const c=(key,label)=>colorControl(label,type[key],value=>set(key,value));
+function editTitles(titles, update) {
+  if (titles.some(clip=>!guardTrack(trackOf(clip)))) return;
+  return change(()=>{ for (const clip of titles) update(clip); });
+}
+
+function titleAnchor(clip,axis,type=titleType(clip)) {
+  if (axis==='y') return clip.style==='caption'?91:clip.style==='lower'?87:50;
+  const {align} = type;
+  return align==='left'?7.5:align==='right'?92.5:50;
+}
+
+function titleRestPosition(clip,axis) {
+  const keys = points(clip,axis);
+  const constant = keys.every(([,value])=>value===keys[0][1]) ? keys[0][1] : 0;
+  return titleAnchor(clip,axis)+constant;
+}
+
+function titlePosition(clip,axis) {
+  return Number((titleRestPosition(clip,axis)+titlePositionOffset(clip,axis)).toFixed(4));
+}
+
+function offsetForTitlePosition(clip,axis,value) {
+  return Number((clamp(value,0,100)-titleRestPosition(clip,axis)).toFixed(4));
+}
+
+function setTitlePosition(clip,axis,value) {
+  (clip.position ||= {})[axis] = offsetForTitlePosition(clip,axis,value);
+}
+
+const alignmentPanel = $('preview-alignment');
+const alignmentButtons = [...alignmentPanel.querySelectorAll('[data-align-x],[data-align-y]')];
+const marginInputs = {x:$('preview-margin-x'),y:$('preview-margin-y')};
+const showMargins = $('preview-show-margins');
+const marginsGuide = $('preview-margins');
+
+function canvasMargins() {
+  return { x:5,y:5,visible:false,...project.canvasMargins };
+}
+
+function refreshCanvasAlignment() {
+  const titles = selectedTitles();
+  const disabled = !titles.length || titles.some(clip=>protectedTrack(project,trackOf(clip)));
+  for (const control of alignmentButtons) control.disabled = disabled;
+  const margins = canvasMargins();
+  for (const axis of ['x','y']) {
+    marginInputs[axis].value = margins[axis];
+    marginsGuide.style.setProperty(`--margin-${axis}`,`${margins[axis]}%`);
+  }
+  showMargins.checked = margins.visible;
+  marginsGuide.hidden = !margins.visible;
+}
+
+for (const axis of ['x','y']) marginInputs[axis].onchange = () => {
+  const value = marginInputs[axis].valueAsNumber;
+  if (Number.isFinite(value)) {
+    project.canvasMargins = { ...canvasMargins(), [axis]:clamp(value,0,45), visible:true };
+    persist();
+  }
+  refreshCanvasAlignment();
+};
+showMargins.onchange = () => {
+  project.canvasMargins = { ...canvasMargins(), visible:showMargins.checked };
+  persist();
+  refreshCanvasAlignment();
+};
+for (const control of alignmentButtons) control.onclick = () => {
+  const titles = selectedTitles();
+  if (!titles.length) return;
+  const { x, y } = canvasMargins();
+  const { alignX,alignY } = control.dataset;
+  if (alignX) editTitles(titles,clip=>{
+    (clip.type ||= {}).align = alignX;
+    setTitlePosition(clip,'x',{left:x,center:50,right:100-x}[alignX]);
+  });
+  else editTitles(titles,clip=>{
+    clip.verticalAlign = alignY;
+    setTitlePosition(clip,'y',{top:y,middle:50,bottom:100-y}[alignY]);
+  });
+};
+document.addEventListener('pointerdown',event=>{
+  if (alignmentPanel.open && !alignmentPanel.contains(event.target)) alignmentPanel.open = false;
+});
+
+function renderTitlePosition(panel,titles) {
+  const coordinate = (axis,label) => numberControl(label,commonValue(titles,clip=>titlePosition(clip,axis)),
+    0,100,'any',value=>editTitles(titles,clip=>setTitlePosition(clip,axis,value)));
+  const position = group('Text position',coordinate('x','Horizontal position (%)'),coordinate('y','Vertical position (%)'));
+  position.open = true;
+  const grid = position.lastElementChild;
+  if (titles.every(clip=>clip.style!=='caption')) {
+    grid.prepend(choice('Position',[['center','Centered'],['lower','Lower third']],commonValue(titles,clip=>clip.style),
+      value=>editTitles(titles,clip=>{ clip.style=value; })));
+  }
+  const place = button('Position in preview',()=>beginTitlePosition(titles));
+  place.dataset.positionInPreview = '';
+  place.setAttribute('aria-pressed',String(positioningTitles));
+  const moves = node('div','title-nudges');
+  moves.setAttribute('role','group');
+  moves.setAttribute('aria-label','Nudge text position');
+  for (const [label,arrow,axis,amount] of [
+    ['Move text left','←','x',-1],['Move text up','↑','y',-1],['Move text down','↓','y',1],['Move text right','→','x',1]
+  ]) {
+    const move = button(arrow,()=>editTitles(titles,clip=>setTitlePosition(clip,axis,titlePosition(clip,axis)+amount)));
+    move.dataset.titleNudge = '';
+    move.title = label;
+    move.setAttribute('aria-label',label);
+    moves.append(move);
+  }
+  grid.append(place,moves);
+  panel.append(position);
+}
+
+function renderTypography(panel,titles,openGroups) {
+  const styles = titles.map(titleType);
+  const read = key=>commonValue(styles,style=>style[key]);
+  const apply = update=>editTitles(titles,clip=>update(clip.type ||= {},titleType(clip)));
+  const set = (key,value)=>apply(type=>{ type[key]=value; });
+  const n=(key,label,min,max,step=1)=>numberControl(label,read(key),min,max,step,value=>set(key,value));
+  const c=(key,label)=>colorControl(label,read(key),value=>set(key,value));
   const menu = inspectorFont;
-  fillFontMenu(menu,type.family);
+  fillFontMenu(menu,read('family'));
   menu.onchange = () => {
     const focused = document.activeElement===menu;
     set('family',menu.value);
@@ -1738,32 +1908,32 @@ function renderTypography(panel, clip,openGroups) {
   };
   const font=group('Typography',
     field('Font',menu),
-    choice('Weight & style',[[0,'Regular'],[1,'Bold'],[2,'Italic'],[3,'Bold italic']],type.weight,v=>set('weight',Number(v))),
+    choice('Weight & style',[[0,'Regular'],[1,'Bold'],[2,'Italic'],[3,'Bold italic']],read('weight'),v=>set('weight',Number(v))),
     n('size','Size (% of frame)',1.5,20,.1),n('leading','Line height',.8,2.6,.05),
-    choice('Alignment',[['left','Left'],['center','Center'],['right','Right']],type.align,v=>set('align',v)),
-    n('tracking','Letter spacing',0,3),choice('Letter case',[['normal','As written'],['upper','Uppercase'],['lower','Lowercase']],type.case,v=>set('case',v)));
+    choice('Alignment',[['left','Left'],['center','Center'],['right','Right']],read('align'),v=>set('align',v)),
+    n('tracking','Letter spacing',0,3),choice('Letter case',[['normal','As written'],['upper','Uppercase'],['lower','Lowercase']],read('case'),v=>set('case',v)));
   font.open=true;
   const materials = node('select');
-  fillMaterialMenu(materials,type.material || (type.gradient?'custom':'solid'));
+  const material = commonValue(styles,type=>type.material || (type.gradient?'custom':'solid'));
+  fillMaterialMenu(materials,material);
   materials.onchange = () => {
     const preset = titleMaterials[materials.value];
-    change(()=>{
-      clip.type ||= {};
-      if (preset) Object.assign(clip.type,{material:materials.value,gradient:{stops:preset.stops,angle:preset.angle},depthColor:preset.side});
-      else Object.assign(clip.type,{material:null,gradient:materials.value==='solid'?null:type.gradient || {stops:customGradientStops,angle:180}});
+    apply((raw,type)=>{
+      if (preset) Object.assign(raw,{material:materials.value,gradient:{stops:preset.stops,angle:preset.angle},depthColor:preset.side});
+      else Object.assign(raw,{material:null,gradient:materials.value==='solid'?null:type.gradient || {stops:customGradientStops,angle:180}});
     });
   };
   const colors = [field('Face material',materials)];
-  if (!type.gradient) colors.push(c('fill','Text color'));
-  else {
-    colors.push(numberControl('Gradient angle (°)',type.gradient.angle,0,360,1,angle=>set('gradient',{...type.gradient,angle})));
-    if (!type.material) {
-      for (const [index,[at,color]] of type.gradient.stops.entries()) {
-        const input = node('input');
-        input.type = 'color';
-        input.value = color;
-        input.onchange = () => set('gradient',{...type.gradient,stops:type.gradient.stops.map((stop,i)=>i===index?[at,input.value]:stop)});
-        colors.push(field(`Color stop ${index+1}`,input));
+  if (styles.every(type=>!type.gradient)) colors.push(c('fill','Text color'));
+  else if (styles.every(type=>type.gradient)) {
+    colors.push(numberControl('Gradient angle (°)',commonValue(styles,type=>type.gradient.angle),0,360,1,
+      angle=>apply((raw,type)=>{ raw.gradient={...type.gradient,angle}; })));
+    const stops = styles[0].gradient.stops;
+    if (material==='custom' && styles.every(type=>type.gradient.stops.length===stops.length &&
+      type.gradient.stops.every(([at],index)=>at===stops[index][0]))) {
+      for (const [index,[at]] of stops.entries()) {
+        colors.push(colorControl(`Color stop ${index+1}`,commonValue(styles,type=>type.gradient.stops[index][1]),
+          value=>apply((raw,type)=>{ raw.gradient={...type.gradient,stops:type.gradient.stops.map((stop,i)=>i===index?[at,value]:stop)}; })));
       }
     }
   }
@@ -2224,6 +2394,7 @@ function renderTools() {
     animation.open=previous.get('Text animations') ?? true;
     tools.append(button('Text List…',openTextList,Boolean(project.timelineLocked)),
       button('Add text',()=>addTitle()),button('Add caption',()=>addTitle(undefined,true)),
+      button('Select all text clips',selectAllTitles,!project.titles.length),
       button('Save SRT',()=>void saveSubtitles(),!project.titles.some(item=>item.style==='caption')),
       language,button(transcribing?'Transcribing…':'Auto-detect subtitles',()=>void autoCaptions(),!transcriptionAvailable || transcribing || !duration));
     if(!transcriptionAvailable) tools.append(node('p','subtle','The offline speech model is unavailable in this build.'));
@@ -2470,6 +2641,7 @@ function cancelPicking() {
 
 function beginPicking(clip) {
   if (!clip?.asset || clip.track) return;
+  stopTitlePosition();
   setPosition(clipStart(clip));
   trackingSource = clip.id;
   trackingBox = null;
@@ -2478,18 +2650,104 @@ function beginPicking(clip) {
   notify('Drag a box around a textured region in the preview');
 }
 
+function previewPoint(event,rect) {
+  return { x:(event.clientX-rect.left)/rect.width*100, y:(event.clientY-rect.top)/rect.height*100 };
+}
+
+function stopTitlePosition() {
+  positioningTitles=false;
+  $('stage').classList.remove('positioning-titles');
+  $('inspector').querySelector('[data-position-in-preview]')?.setAttribute('aria-pressed','false');
+}
+
+function beginTitlePosition(titles) {
+  if (positioningTitles) { stopTitlePosition(); return; }
+  if (titles.some(clip=>!guardTrack(trackOf(clip)))) return;
+  stopTextPlacement();
+  cancelPicking();
+  pause();
+  if (!titles.some(clip=>clip.start<=cursor && cursor<clip.start+clip.len)) {
+    setPosition(Math.min(...titles.map(clip=>clip.start)));
+    revealCursor();
+  }
+  positioningTitles=true;
+  $('stage').classList.add('positioning-titles');
+  $('inspector').querySelector('[data-position-in-preview]')?.setAttribute('aria-pressed','true');
+  notify('Click where you want the selected text on the preview');
+}
+
+function startTitleDrag(event,title,stage) {
+  event.preventDefault();
+  pause();
+  if (!isSelected(title.id) || event.ctrlKey || event.metaKey) select(title.id,{toggle:event.ctrlKey || event.metaKey});
+  if (!isSelected(title.id)) return;
+  const titles = selectedTitles();
+  if (titles.some(clip=>protectedTrack(project,trackOf(clip)))) return;
+  const rect = stage.getBoundingClientRect();
+  const initial = previewPoint(event,rect);
+  const start = new Map(titles.map(clip=>[clip.id,{x:titlePosition(clip,'x'),y:titlePosition(clip,'y')} ]));
+  const visible = [...$('preview-titles').querySelectorAll('[data-preview-title]')]
+    .map(label=>({label,clip:titles.find(clip=>clip.id===label.dataset.previewTitle)})).filter(item=>item.clip);
+  const listeners = new AbortController();
+  const options = {signal:listeners.signal};
+  let moved = false;
+  let delta;
+  const update = move=>{
+    if (move.pointerId!==event.pointerId) return;
+    if (!moved && Math.hypot(move.clientX-event.clientX,move.clientY-event.clientY)<3) return;
+    moved=true;
+    const point = previewPoint(move,rect);
+    delta = {x:point.x-initial.x,y:point.y-initial.y};
+    for (const {label,clip} of visible) {
+      const at = start.get(clip.id);
+      const position = {x:offsetForTitlePosition(clip,'x',at.x+delta.x),y:offsetForTitlePosition(clip,'y',at.y+delta.y)};
+      styleMotion(label.parentElement,{...clip,position},cursor-clip.start);
+    }
+  };
+  const finish = cancelled=>{
+    listeners.abort();
+    cancelTitleDrag = null;
+    stage.classList.remove('dragging-title');
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+    if (!cancelled && moved) editTitles(titles,clip=>{
+      const at = start.get(clip.id);
+      setTitlePosition(clip,'x',at.x+delta.x);
+      setTitlePosition(clip,'y',at.y+delta.y);
+    });
+    else if (moved) display(cursor);
+  };
+  cancelTitleDrag = ()=>finish(true);
+  stage.setPointerCapture(event.pointerId);
+  stage.classList.add('dragging-title');
+  stage.addEventListener('pointermove',update,options);
+  stage.addEventListener('pointerup',end=>{
+    if (end.pointerId!==event.pointerId) return;
+    update(end);
+    finish(false);
+  },options);
+  stage.addEventListener('lostpointercapture',end=>{ if (end.pointerId===event.pointerId) finish(true); },options);
+}
+
 $('stage').onpointerdown = event => {
-  if(placingText && event.button===0) {
-    const rect=$('stage').getBoundingClientRect();
-    const x=clamp(((event.clientX-rect.left)/rect.width-.5)*100,-44,44);
-    const y=clamp(((event.clientY-rect.top)/rect.height-.5)*100,-42,42);
+  if (event.button!==0 || cancelTitleDrag) return;
+  const stage = $('stage');
+  if (placingText) {
+    const {x,y} = previewPoint(event,stage.getBoundingClientRect());
     stopTextPlacement();
-    addTitle({motion:{x:[[0,x]],y:[[0,y]]}});
+    addTitle({position:{x:clamp(x,0,100)-50,y:clamp(y,0,100)-50}},false,true);
     return;
   }
+  if (positioningTitles) {
+    const {x,y} = previewPoint(event,stage.getBoundingClientRect());
+    const titles = selectedTitles();
+    stopTitlePosition();
+    editTitles(titles,clip=>{ setTitlePosition(clip,'x',x); setTitlePosition(clip,'y',y); });
+    return;
+  }
+  const title = dropTitleTarget(event);
+  if (!picking && title) return startTitleDrag(event,title,stage);
   const clip = selection();
   if (!picking || !clip || clip.id !== trackingSource) return;
-  const stage = $('stage');
   const rect = stage.getBoundingClientRect();
   const offset = clamp(cursor-clipStart(clip),0,clip.len-1);
   const { w,h,aspect } = fittedMediaSize(clip,active);
@@ -2517,6 +2775,8 @@ $('stage').onpointerdown = event => {
 };
 
 function stopTextPlacement() {
+  stopTitlePosition();
+  cancelTitleDrag?.();
   placingText=false;
   $('stage').classList.remove('placing-text');
   $('place-text').setAttribute('aria-pressed','false');
@@ -2524,6 +2784,7 @@ function stopTextPlacement() {
 
 $('place-text').onclick=()=>{
   if(placingText){stopTextPlacement();return;}
+  stopTitlePosition();
   cancelPicking();
   pause();
   placingText=true;
@@ -2533,7 +2794,7 @@ $('place-text').onclick=()=>{
 };
 
 function dropTitleTarget(event) {
-  const title=event.target.closest('[data-preview-title]')?.dataset.previewTitle;
+  const title=event.target.closest('#preview-titles [data-preview-title]')?.dataset.previewTitle;
   return title ? project.titles.find(item=>item.id===title) : null;
 }
 
@@ -2780,8 +3041,17 @@ function refreshTrackControls() {
     lane.classList.toggle('muted-track',Boolean(settings.muted));
   }
   selectTrack(selectedTrack);
+  refreshCanvasAlignment();
   const clip = selection();
   const isProtected = clip && protectedTrack(project,trackOf(clip));
+  const batch = $('inspector').querySelector('[data-title-batch]');
+  if (batch) {
+    const locked = selectedTitles().some(title=>protectedTrack(project,trackOf(title)));
+    batch.disabled = locked;
+    $('inspector').querySelector('[data-title-batch-lock]').hidden = !locked;
+    if (locked) stopTitlePosition();
+    return;
+  }
   for(const control of $('inspector').querySelectorAll('input,select,textarea')){
     if(isProtected && !control.disabled){
       control.disabled=true;
@@ -2793,13 +3063,15 @@ function refreshTrackControls() {
   }
   const reset = $('inspector').querySelector('[data-transform-reset]');
   if (reset && clip) reset.disabled = isProtected || !hasTransformEdits(clip);
+  for (const control of $('inspector').querySelectorAll('[data-title-nudge],[data-position-in-preview]')) control.disabled = Boolean(isProtected);
+  if (isProtected) stopTitlePosition();
 }
 
 function renderKeyLanes() {
   for (const label of $('track-labels').querySelectorAll('.track-key')) label.remove();
   $('key-lanes').replaceChildren();
   const clip = selection();
-  if (!clip || page !== 'animation') return;
+  if (!clip || page !== 'animation' || selectedGroup.size && selectedTitles().length>1) return;
   for (const key of Object.keys(properties)) {
     if (clip.asset && key==='reveal') continue;
     if (!clip.motion?.[key]?.length) continue;
@@ -3101,6 +3373,7 @@ function displayTitles(sequence,captions,stage,container,frame) {
     const layer = node('div','program-title-layer');
     const label = node('div', 'preview-title');
     label.dataset.previewTitle=title.id;
+    if (sequence===project && isSelected(title.id)) label.classList.add('canvas-selected');
     const offset = frame - title.start;
     styleTitle(label,title,offset,stage);
     layer.append(label);
@@ -3126,9 +3399,9 @@ function styleTitle(label,title,offset,stage=$('stage')) {
   label.style.textAlign=type.align;
   label.classList.toggle('gradient-title',Boolean(type.gradient));
   label.style.color=type.gradient?'transparent':type.fill;
-  label.style.left=type.align==='left'?'7.5%':type.align==='right'?'92.5%':'50%';
-  label.style.top=title.style==='caption'?'91%':title.style==='lower'?'87%':'50%';
-  label.style.translate=`${type.align==='left'?'0':type.align==='right'?'-100%':'-50%'} ${title.style==='center'?'-50%':'-100%'}`;
+  label.style.left=`${titleAnchor(title,'x',type)}%`;
+  label.style.top=`${titleAnchor(title,'y',type)}%`;
+  label.style.translate=`${type.align==='left'?'0':type.align==='right'?'-100%':'-50%'} ${-100*titleVerticalAnchor(title)}%`;
   const units=value=>`${value*100/1080}cqh`;
   label.style.background=type.background+Math.round(type.boxOpacity*2.55).toString(16).padStart(2,'0');
   label.style.padding=type.boxOpacity?units(type.padding):'0';
@@ -3180,7 +3453,9 @@ function setAudioLevel(element, clip, envelope=1, sequence=project, parentMix) {
 function styleMotion(el, clip, local) {
   const value = key => valueAt(clip,key,local);
   const scale = value('scale') / 100;
-  el.style.transform = `translate(${value('x')}cqw, ${value('y')}cqh) rotate(${value('rotation')}deg) scale(${scale})`;
+  const x = value('x')+titlePositionOffset(clip,'x');
+  const y = value('y')+titlePositionOffset(clip,'y');
+  el.style.transform = `translate(${x}cqw, ${y}cqh) rotate(${value('rotation')}deg) scale(${scale})`;
   el.style.opacity = value('opacity') / 100;
   el.style.filter = `brightness(${value('brightness')}%) contrast(${value('contrast')}%) saturate(${value('saturation')}%)`;
   el.style.clipPath = `inset(${value('top')}% ${value('right')}% ${value('bottom')}% ${value('left')}%)`;
@@ -4101,7 +4376,11 @@ document.addEventListener('keydown', event => {
     revealCursor();
   }
 });
-document.addEventListener('keydown',event=>{if(event.key==='Escape') stopTextPlacement();});
+document.addEventListener('keydown',event=>{
+  if (event.key!=='Escape') return;
+  if (alignmentPanel.open) alignmentPanel.open = false;
+  stopTextPlacement();
+});
 
 $('export').onclick = () => {
   pause();
@@ -4204,7 +4483,7 @@ void api('/api/fonts').then(names=>{
   const list = $('text-list-font');
   fillFontMenu(list,list.value,true);
   const inspector = $('inspector').querySelector('[data-title-font]');
-  if (inspector) fillFontMenu(inspector,inspector.value);
+  if (inspector) fillFontMenu(inspector,inspector.value || mixed);
 }).catch(()=>{ /* The standard fonts remain usable if Windows cannot be scanned. */ });
 try {
   for (const asset of await api('/api/media')) bin.set(asset.id, asset);

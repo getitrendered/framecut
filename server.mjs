@@ -8,10 +8,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { expression, hasVideoFraming, points, properties, videoFit, videoStretch } from './motion.mjs';
+import { expression, hasVideoFraming, points, properties, titlePositionOffset, valueAt, videoFit, videoStretch } from './motion.mjs';
 import { exportRange, exportWindow, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
-import { extrusionOffsets, textCharacters, textFragment, titleType, typewriterStep, typographyText, usesTextReveal, wrapText } from './text.mjs';
+import { extrusionOffsets, textCharacters, textFragment, titleType, titleVerticalAnchor, typewriterDuration, typewriterSteps, typographyText, usesTextReveal, wrapText } from './text.mjs';
 import { installedFontNames, stageTitleFont } from './fonts.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
@@ -875,26 +875,35 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     const chars = textCharacters(wrapped);
     const reveal = usesTextReveal(title);
     const animatedText = reveal || title.typewriter;
-    const count = animatedText ? Math.min(chars.length,24) : 1;
+    const count = animatedText ? typewriterSteps(chars) : 1;
     const rasterFrames = animatedText ? visibleLength : 1;
     const sourceLength = title.sourceLength ?? title.len;
     const localFrame = title.sectionOffset ? `(n+${title.sectionOffset})` : 'n';
-    const progress = reveal ? expression(title,'reveal',localFrame) : '';
-    const step = typewriterStep(sourceLength,count);
+    const typing = typewriterDuration(sourceLength);
+    const progress = reveal ? expression(title,'reveal',localFrame) : `min(100,(${localFrame}+1)*100/${typing})`;
     const longest=Math.max(1,...wrapped.split('\n').map(row=>[...row].length));
     const fontSize=Math.max(8,Math.round(Math.min(size,width*.86/(longest*(.56+type.tracking*.08)))));
     const x=type.align==='left' ? 'w*0.075' : type.align==='right' ? 'w*0.925-tw' : '(w-tw)/2';
-    const y=title.style==='caption' ? 'h*0.91-th' : title.style==='lower' ? 'h*0.87-th' : '(h-th)/2';
+    const baseY=caption ? .91 : title.style==='lower' ? .87 : .5;
+    const anchorY=titleVerticalAnchor(title);
+    const y=`h*${baseY}-th*${anchorY}`;
     const draw=[], shadow=[], mask=[];
     const depth = [...new Set(extrusionOffsets(type).map(([x,y])=>`${Math.round(x*units)},${Math.round(y*units)}`))]
       .filter(pair=>pair!=='0,0').map(pair=>pair.split(','));
     const color=(hex,alpha=100)=>`0x${hex.slice(1)}@${(alpha/100).toFixed(3)}`;
-    for (let part = 0; part < count && (reveal || part*step<sourceLength); part++) {
+    // Only generate states the requested frames can display. Long clips can use the full bounded list.
+    const visibleParts = animatedText && visibleLength<=300 ? new Set() : null;
+    if (visibleParts) for (let frame=0;frame<visibleLength;frame++) {
+      const local = frame+(title.sectionOffset ?? 0);
+      const percent = reveal ? valueAt(title,'reveal',local) : Math.min(100,(local+1)*100/typing);
+      const part = Math.ceil(percent*count/100)-1;
+      for (const offset of [-1,0,1]) visibleParts.add(part+offset);
+    }
+    for (let part = 0; part < count; part++) {
+      if (visibleParts && !visibleParts.has(part)) continue;
       const file = `title-${i}-${part}.txt`;
       await writeFile(join(folder,file),typographyText(textFragment(chars,count,part+1),type));
-      const limit = part + 1 === count ? sourceLength : (part + 1) * step;
-      const enable = reveal ? `gt(${progress},${part*100/count})*lte(${progress},${(part+1)*100/count})`
-        : `gte(${localFrame},${part*step})*lt(${localFrame},${limit})`;
+      const enable = `gt(${progress},${part*100/count})*lte(${progress},${(part+1)*100/count})`;
       const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}${animatedText ? `:enable='${enable}'` : ''}`;
       if(type.shadow) shadow.push(`${base}:fontcolor=black@${type.shadow/100}:x=(${x})+(${Math.round(type.shadowX*units)}):y=(${y})+(${Math.round(type.shadowY*units)})`);
       const box=type.boxOpacity ? `:box=1:boxcolor=${color(type.background,type.boxOpacity)}:boxborderw=${Math.round(type.padding*units)}` : '';
@@ -917,7 +926,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       const faceWidth = Math.min(width*.9,longest*fontSize*(.56+type.tracking*.08));
       const faceHeight = fontSize*(.78+(wrapped.split('\n').length-1)*type.leading);
       const cx = type.align==='left' ? width*.075+faceWidth/2 : type.align==='right' ? width*.925-faceWidth/2 : width/2;
-      const cy = caption ? height*.91-faceHeight/2 : title.style==='lower' ? height*.87-faceHeight/2 : height/2;
+      const cy = height*baseY+faceHeight*(.5-anchorY);
       const paint = gradientPaint(type.gradient,cx,cy,faceWidth,faceHeight);
       filter.push([canvas,...shadow,...draw].join(',')+`[under${i}]`);
       filter.push([canvas,...mask,'alphaextract'].join(',')+`[mask${i}]`);
@@ -932,7 +941,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       video = `titled${i}`;
     } else {
       if(title.start>captionEnd) captionGap(title.start-captionEnd);
-      if(['x','y','scale'].some(key=>changed(title,key))) {
+      if (['x','y','scale'].some(key=>changed(title,key)) || titlePositionOffset(title,'x') || titlePositionOffset(title,'y')) {
         filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength}[captbase${i}]`);
         composite(filter,`captbase${i}`,`title${i}`,{...title,len:visibleLength},0,`caption${i}`,width,height,true);
         captionSegments.push(`caption${i}`);
@@ -1041,8 +1050,8 @@ function videoStream(filter,clip,input,width,height,alpha,output) {
 
 function composite(filter, base, layer, clip, start, target, width, height, alpha=false) {
   const at = `(max(0,round(t*${fps})-${start})+${clip.sectionOffset ?? 0})`;
-  const x = `(main_w-overlay_w)/2+${width}*(${expression(clip,'x',at)})/100`;
-  const y = `(main_h-overlay_h)/2+${height}*(${expression(clip,'y',at)})/100`;
+  const x = `(main_w-overlay_w)/2+${width}*(${expression(clip,'x',at)}+(${titlePositionOffset(clip,'x')}))/100`;
+  const y = `(main_h-overlay_h)/2+${height}*(${expression(clip,'y',at)}+(${titlePositionOffset(clip,'y')}))/100`;
   filter.push(`[${base}][${layer}]overlay=x='${x}':y='${y}':eof_action=pass:repeatlast=0${alpha?':format=auto':''}:enable='gte(t,${start/fps})*lt(t,${(start+clip.len)/fps})'[${target}]`);
 }
 
