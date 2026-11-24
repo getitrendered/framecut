@@ -13,6 +13,38 @@ export function readCatalog(value) {
   };
 }
 
+export function migrateProjectImports(catalog, assets, luts, createRecoveredProject) {
+  if (catalog.importsScoped === true) return;
+  const claimedMedia = new Set();
+  const claimedLuts = new Set();
+  for (const entry of catalog.projects) {
+    const media = new Set(entry.mediaIds || []);
+    const profiles = new Set(entry.lutIds || []);
+    for (const sequence of [entry.main,...entry.compositions.map(item=>item.sequence)]) {
+      for (const key of Object.keys(sequence.assignments || {})) media.add(key);
+      for (const clip of [...sequence.clips,...(sequence.overlays || []),...(sequence.sounds || [])]) {
+        if (clip.asset) media.add(clip.asset);
+        if (clip.lut) profiles.add(clip.lut);
+      }
+    }
+    for (const wall of entry.led?.walls || []) if (wall.asset && !wall.sequence) media.add(wall.asset);
+    for (const key of entry.removedAssets || []) media.add(key);
+    entry.mediaIds = [...media].filter(key=>!assets.get(key)?.composition);
+    entry.lutIds = [...profiles];
+    entry.mediaIds.forEach(key=>claimedMedia.add(key));
+    entry.lutIds.forEach(key=>claimedLuts.add(key));
+  }
+  const unclaimed = [...assets.values()].filter(asset=>!asset.composition && !claimedMedia.has(asset.id)).map(asset=>asset.id);
+  const unclaimedLuts = [...luts.keys()].filter(key=>!claimedLuts.has(key));
+  if (unclaimed.length || unclaimedLuts.length) {
+    const entry = catalog.projects.length===1 ? catalog.projects[0] : createRecoveredProject();
+    entry.mediaIds.push(...unclaimed);
+    entry.lutIds.push(...unclaimedLuts);
+    if (!catalog.projects.includes(entry)) catalog.projects.push(entry);
+  }
+  catalog.importsScoped = true;
+}
+
 function element(tag, className, content) {
   const control = document.createElement(tag);
   if (className) control.className = className;

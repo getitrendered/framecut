@@ -5,7 +5,7 @@ import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs
 import { setupUpdates } from '/updates-ui.mjs';
 import { changesLockedClips, clipMix, clipsIn, gainDb, protectedTrack, trackOf, trackSettings } from '/tracks.mjs';
 import { contentDuration, exportRange, MAX_DURATION, sequenceDuration, sequenceSize } from '/sequences.mjs';
-import { catalogKey, compositionType, projectControls, readCatalog } from '/projects.mjs';
+import { catalogKey, compositionType, migrateProjectImports, projectControls, readCatalog } from '/projects.mjs';
 import { createLedWorkspace } from '/led.mjs';
 import '/layout.mjs';
 const $ = id => document.getElementById(id);
@@ -248,7 +248,9 @@ function openProject(key) {
   if (!next) return false;
   saveView();
   clearTimeout(saveFeedback);
+  clearTimeout(importToast);
   $('save-project').textContent = 'Save';
+  $('global-import-status').hidden = true;
   timelineClipboard = null;
   folder = 'all';
   sourceAsset = null;
@@ -262,6 +264,7 @@ function openProject(key) {
   $('media-status').hidden = true;
   $('projects-status').textContent = '';
   entry = next;
+  if (mediaLoaded) notify('Ready');
   activateSequence('main');
   return true;
 }
@@ -276,14 +279,19 @@ function openSequence(key) {
 
 function createProjectSequence(values, composition = false) {
   if (busySwitch()) return false;
-  const key = id();
   if (composition) {
+    const key = id();
     entry.compositions.push({ id:key, sequence:newSequence(values) });
     controls.drawer(false);
     return openSequence(key);
   }
-  catalog.projects.push({ id:key, main:newSequence(values), compositions:[], updated:Date.now() });
-  return openProject(key);
+  const next = newProject(values);
+  catalog.projects.push(next);
+  return openProject(next.id);
+}
+
+function newProject(values) {
+  return { id:id(), main:newSequence(values), compositions:[], mediaIds:[], lutIds:[], updated:Date.now() };
 }
 
 function editSequence(values) {
@@ -386,7 +394,7 @@ async function placeComposition(key, at, track = 0) {
 }
 
 const led = createLedWorkspace({
-  assets:()=>[...bin.values()].filter(asset=>asset.kind!=='audio' && !asset.composition && !removedAsset(asset.id)),
+  assets:()=>projectMedia().filter(asset=>asset.kind!=='audio'),
   sequences:()=>entry ? [{id:'main',sequence:entry.main},...entry.compositions] : [],
   scene:()=>entry.led ??= { walls:[], camera:{ pitch:-10, yaw:18, zoom:1 } },
   url:asset=>programUrl({asset:asset.id},'auto'),
@@ -467,9 +475,35 @@ function removedAsset(key) {
   return entry?.removedAssets?.includes(key) ?? false;
 }
 
+function projectAsset(key) {
+  const asset = entry?.mediaIds?.includes(key) ? bin.get(key) : null;
+  return asset?.composition ? null : asset;
+}
+
+function projectMedia(includeRemoved = false) {
+  const removed = new Set(includeRemoved ? [] : entry?.removedAssets);
+  return (entry?.mediaIds || []).map(key=>bin.get(key)).filter(asset=>asset && !asset.composition && !removed.has(asset.id));
+}
+
+function addProjectAsset(asset) {
+  bin.set(asset.id,asset);
+  const media = entry.mediaIds ??= [];
+  if (media.includes(asset.id)) return;
+  media.push(asset.id);
+  persist();
+}
+
+function addProjectLut(lut) {
+  lutLibrary.set(lut.id,lut);
+  const luts = entry.lutIds ??= [];
+  if (luts.includes(lut.id)) return;
+  luts.push(lut.id);
+  persist();
+}
+
 function setAssetRemoved(key, remove) {
-  const asset = bin.get(key);
-  if (!entry || !asset || asset.composition) return;
+  const asset = projectAsset(key);
+  if (!asset) return;
   const removed = new Set(entry.removedAssets || []);
   if (remove) removed.add(key);
   else removed.delete(key);
@@ -485,8 +519,9 @@ function setAssetRemoved(key, remove) {
 function renderBin() {
   renderFolders();
   const search = $('media-search').value.trim().toLowerCase();
-  const shown = [...bin.values()].filter(asset => !asset.composition &&
-    (folder==='removed' ? removedAsset(asset.id) : !removedAsset(asset.id) && (folder==='all' || (project.assignments[asset.id] || '')===folder))
+  const available = projectMedia(folder==='removed');
+  const shown = available.filter(asset =>
+    (folder==='removed' ? removedAsset(asset.id) : folder==='all' || (project.assignments[asset.id] || '')===folder)
     && asset.name.toLowerCase().includes(search));
   const sort = $('media-sort').value;
   if (sort === 'name') shown.sort((a, b) => a.name.localeCompare(b.name));
@@ -496,7 +531,7 @@ function renderBin() {
   $('bin').replaceChildren();
   if (!shown.length) {
     const empty = node('div', 'media-empty');
-    empty.append(node('b', '', bin.size ? 'No footage here' : 'Import your footage'), document.createElement('br'),
+    empty.append(node('b', '', available.length ? 'No footage here' : 'Import your footage'), document.createElement('br'),
       search ? 'Try another search' : 'Drop video files here');
     $('bin').append(empty);
   }
@@ -570,17 +605,17 @@ async function importFiles(files) {
         if (file.size>1_000_000) throw new Error('Choose a subtitle or script file under 1 MB.');
         const content = await file.text();
         if (extension==='srt') addCues(readSrt(content));
-        else addCues(content.replace(/\r\n?/g,'\n').split('\n').map(cleanText).filter(Boolean)
+        else addCues(content.replace(/\r\n?/g,'\n').split('\n').map(line=>cleanText(line)).filter(Boolean)
           .map((text,index)=>({start:index*3*fps,len:3*fps,text})),cursor);
       } else if (extension==='cube') {
         const lut = await api('/api/luts',{method:'POST',headers:{'X-Framecut':'1','X-Filename':encodeURIComponent(file.name)},body:file});
-        lutLibrary.set(lut.id,lut);
+        addProjectLut(lut);
         const clip = selection();
         if (clip?.asset && clip.kind!=='audio' && !protectedTrack(project,trackOf(clip))) change(()=>{ clip.lut=lut.id; });
       } else if (extension==='obj') {
         if (file.size>950000) throw new Error('Choose an OBJ file smaller than 950 KB.');
         const asset = await jsonPost('/api/graphics',{kind:'mesh',mesh:await file.text(),name:file.name});
-        bin.set(asset.id,asset);
+        addProjectAsset(asset);
         if (page==='effects') {
           const track = Math.max(1,project.layers);
           const last = project.overlays.filter(clip=>clip.track===track);
@@ -591,11 +626,10 @@ async function importFiles(files) {
         const asset = await (window.framecutDesktop?.importVideo?.(file) || api('/api/media', {
           method:'POST', headers:{'X-Framecut':'1','X-Filename':encodeURIComponent(file.name),'X-File-Size':String(file.size)},body:file
         }));
-        bin.set(asset.id,asset);
         sourceAsset = asset.id;
         if (folder==='removed') folder = 'all';
         if (folder && folder!=='all') project.assignments[asset.id] = folder;
-        persist();
+        addProjectAsset(asset);
       }
       added++;
       renderBin();
@@ -652,7 +686,7 @@ function renderFolders() {
 }
 
 function moveAsset(assetId, to) {
-  if (!bin.has(assetId)) return;
+  if (!projectAsset(assetId)) return;
   if (to) project.assignments[assetId] = to;
   else delete project.assignments[assetId];
   persist();
@@ -661,7 +695,7 @@ function moveAsset(assetId, to) {
 }
 
 function renderSource() {
-  const asset = bin.get(sourceAsset);
+  const asset = projectAsset(sourceAsset);
   const video = $('source-video');
   const audio = $('source-audio');
   const isAudio = asset?.kind==='audio';
@@ -749,7 +783,7 @@ function switchPage(next) {
 }
 
 function insertOverlay(assetId, track = project.layers || 1, start = cursor, graphic = false, composition) {
-  const asset = bin.get(assetId);
+  const asset = composition ? bin.get(assetId) : projectAsset(assetId);
   if (!asset || !guardTrack(`video:${track}`)) return;
   const clip = { id: id(), asset: assetId, track, in: 0, len: asset.frames, start: 0, motion: { scale: [[0, graphic || composition ? 100 : 60]] }, muted: !composition };
   if (composition) Object.assign(clip,{ composition, compositionFollow:true });
@@ -773,7 +807,7 @@ function freeStart(items, start, len, ignore) {
 }
 
 function insertVideo(assetId, index, dropStart, composition) {
-  const asset = bin.get(assetId);
+  const asset = composition ? bin.get(assetId) : projectAsset(assetId);
   if (!asset || !guardTrack('video:0')) return;
   const at=dropStart ?? (index<timeline.length ? timeline[index].start : videoEnd);
   const clip = { id: id(), asset: asset.id, in: 0, len: asset.frames, start:freeStart(project.clips,Math.max(0,at),asset.frames) };
@@ -1160,7 +1194,7 @@ function pasteTimelineClip(at = cursor) {
 }
 
 function copyFootage(cut) {
-  const asset = bin.get(sourceAsset);
+  const asset = projectAsset(sourceAsset);
   if (!asset) return false;
   timelineClipboard = { asset:asset.id, move:cut };
   reportImport(cut ? 'Footage ready to move. Open a folder and paste.' : 'Footage copied. Open Edit and paste into the timeline.');
@@ -1183,7 +1217,7 @@ function copyKeyframe(dot, cut) {
 function pasteEditorItem() {
   if (!timelineClipboard) return false;
   if (page === 'footage') {
-    if (!timelineClipboard.move || !bin.has(timelineClipboard.asset)) return false;
+    if (!timelineClipboard.move || !projectAsset(timelineClipboard.asset)) return false;
     if (folder === 'all') {
       reportImport('Select a destination folder, then paste.');
       return true;
@@ -1201,7 +1235,7 @@ function pasteEditorItem() {
     pasteTimelineClip();
     return true;
   }
-  if (bin.has(timelineClipboard.asset)) {
+  if (projectAsset(timelineClipboard.asset)) {
     if (timelineClipboard.move) {
       notify('Paste cut footage into a folder in Footage.');
       return true;
@@ -1390,7 +1424,7 @@ async function findClosestLoop(clip) {
   notify('Comparing the source’s beginning and ending frames…');
   try {
     const result=await jsonPost('/api/loop',{asset,in:sourceIn,len});
-    bin.set(result.asset.id,result.asset);
+    addProjectAsset(result.asset);
     sourceAsset=result.asset.id;
     const source=[...project.clips,...project.overlays].find(item=>item.id===clip.id);
     if(source && !project.timelineLocked && source.asset===asset && source.in===sourceIn && source.len===len){
@@ -1599,7 +1633,8 @@ async function buildSound(settings,track,start=cursor) {
   notify('Creating sound…');
   try {
     let asset=Object.hasOwn(soundPresets,settings.preset) ? [...bin.values()].find(item=>item.preset===settings.preset) : null;
-    if(!asset){ asset=await jsonPost('/api/sound',settings); if(settings.preset) asset.preset=settings.preset; bin.set(asset.id,asset); }
+    if(!asset){ asset=await jsonPost('/api/sound',settings); if(settings.preset) asset.preset=settings.preset; }
+    addProjectAsset(asset);
     insertSound(asset,track,start);
     notify(`Added ${asset.name}`);
   } catch(error){ notify(error.message); }
@@ -1649,8 +1684,8 @@ function renderSoundTools(tools) {
   const picker=node('select','tool-select');
   picker.setAttribute('aria-label','Imported audio');
   picker.add(new Option('Choose imported audio…',''));
-  for(const item of bin.values()) if(item.kind==='audio' && !removedAsset(item.id)) picker.add(new Option(item.name,item.id));
-  const add=button('Add audio to timeline',()=>{ const asset=bin.get(picker.value); if(asset) insertSound(asset); },true);
+  for(const item of projectMedia()) if(item.kind==='audio') picker.add(new Option(item.name,item.id));
+  const add=button('Add audio to timeline',()=>{ const asset=projectAsset(picker.value); if(asset) insertSound(asset); },true);
   picker.onchange=()=>{add.disabled=!picker.value;};
   tools.append(picker,add,designer,node('h2','','Sound library'),library);
 }
@@ -1864,7 +1899,7 @@ function renderTools() {
     const asset = node('select','tool-select');
     asset.setAttribute('aria-label','Footage to add');
     asset.add(new Option('Choose footage…',''));
-    for (const item of bin.values()) if(item.kind!=='audio' && !item.composition && !removedAsset(item.id)) asset.add(new Option(item.name,item.id));
+    for (const item of projectMedia()) if(item.kind!=='audio') asset.add(new Option(item.name,item.id));
     const add = button('Add to video track', () => insertVideo(asset.value,project.clips.length), true);
     const layer = button('Add on top layer', () => insertOverlay(asset.value), true);
     asset.onchange = () => { add.disabled = layer.disabled = !asset.value; };
@@ -1940,7 +1975,10 @@ function renderTools() {
   } else if (page === 'color') {
     const select = node('select','tool-select');
     select.add(new Option('No LUT', ''));
-    for (const lut of lutLibrary.values()) select.add(new Option(lut.name, lut.id));
+    for (const key of entry?.lutIds || []) {
+      const lut = lutLibrary.get(key);
+      if (lut) select.add(new Option(lut.name,lut.id));
+    }
     select.value = clip?.lut || '';
     select.disabled = !clip?.asset;
     select.onchange = () => change(() => { clip.lut = select.value; });
@@ -2077,7 +2115,7 @@ async function addGraphic(kind, file, settings) {
   try {
     if (file && file.size > 950000) throw new Error('Choose an OBJ file smaller than 950 KB.');
     const asset = await jsonPost('/api/graphics',{kind, mesh:file ? await file.text() : undefined,name:file?.name,settings});
-    bin.set(asset.id,asset);
+    addProjectAsset(asset);
     renderBin();
     const last = project.overlays.filter(clip => clip.track === project.layers);
     const track = last.some(clip => start < clip.start + clip.len && start + asset.frames > clip.start) ? Math.min(8,project.layers+1) : project.layers || 1;
@@ -2233,7 +2271,7 @@ async function removeMarkedObject(clip, follow) {
   notify('Removing object locally…');
   try {
     const asset = await jsonPost('/api/remove-object',{ asset:clip.asset, in:clip.in, len:clip.len, box:trackingBox, follow });
-    bin.set(asset.id,asset);
+    addProjectAsset(asset);
     sourceAsset = asset.id;
     notify(`Added ${asset.name} to Footage`);
   } catch (error) { notify(error.message); }
@@ -2246,7 +2284,7 @@ async function upscale(clip) {
   notify('Upscaling selected footage to 2× resolution…');
   try {
     const asset = await jsonPost('/api/upscale', { asset:clip.asset, in:clip.in, len:clip.len });
-    bin.set(asset.id, asset);
+    addProjectAsset(asset);
     renderBin();
     notify(`Added ${asset.name} to Footage`);
   } catch (error) { notify(error.message); }
@@ -3710,6 +3748,7 @@ $('import').disabled = true;
 try {
   for (const asset of await api('/api/media')) bin.set(asset.id, asset);
   for (const lut of await api('/api/luts')) lutLibrary.set(lut.id, lut);
+  migrateProjectImports(catalog,bin,lutLibrary,()=>newProject({name:'Recovered imports'}));
   const tools=await api('/api/tools');
   objectRemovalAvailable=tools.objectRemoval;
   transcriptionAvailable=tools.transcription;
