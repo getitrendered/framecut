@@ -136,7 +136,7 @@ namespace FramecutRelease
                             !names.Add(name) || names.Count > 60)
                             throw new IOException("The update package contains an unexpected file.");
                         bytes += entry.Length;
-                        if (bytes > 20_000_000) throw new IOException("The update package is too large.");
+                        if (bytes > 20000000) throw new IOException("The update package is too large.");
                         entry.ExtractToFile(Path.Combine(staging, name));
                     }
                 }
