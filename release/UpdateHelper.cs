@@ -132,7 +132,7 @@ namespace FramecutRelease
                     {
                         var name = entry.FullName;
                         if (name != Path.GetFileName(name) || name.IndexOf(':') >= 0 ||
-                            !System.Text.RegularExpressions.Regex.IsMatch(name, @"^[A-Za-z0-9-]+\.(?:js|mjs|cjs|json|html|css|ico|py|exe)$") ||
+                            !System.Text.RegularExpressions.Regex.IsMatch(name, @"^[A-Za-z0-9_-]+\.(?:js|mjs|cjs|json|html|css|ico|py|exe)$") ||
                             !names.Add(name) || names.Count > 60)
                             throw new IOException("The update package contains an unexpected file.");
                         bytes += entry.Length;
