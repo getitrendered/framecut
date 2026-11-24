@@ -113,6 +113,57 @@ export function textListMotion({entrance,exit,enterFrames,holdFrames,exitFrames}
   return motion;
 }
 
+const timingCache = new Map();
+
+export function titleTiming(title) {
+  if (title.typewriter) return null;
+  const saved = title.textTiming;
+  if (saved && saved.enterFrames+saved.holdFrames+saved.exitFrames===title.len &&
+    Object.entries(textListMotion(saved)).every(([key,keys])=>JSON.stringify(keys)===JSON.stringify(title.motion?.[key]))) return saved;
+  const cut = {entrance:'cut',exit:'cut',enterFrames:0,holdFrames:title.len,exitFrames:0};
+  const pairs = Object.entries(title.motion || {}).filter(([,keys])=>keys.length).sort(([a],[b])=>a.localeCompare(b));
+  if (!pairs.length) return cut;
+  const frames = [...new Set(pairs.flatMap(([,keys])=>keys.map(([at])=>at)))];
+  if (frames.length>12) return null;
+  const options = (presets, durations) => Object.entries(presets).flatMap(([name,[,motion]])=>{
+    if (name==='cut') return [[name,0]];
+    return Object.keys(motion).every(key=>pairs.some(([present])=>key===present)) ? durations.map(len=>[name,len]) : [];
+  });
+  const signature = JSON.stringify(pairs);
+  const cacheKey = `${title.len}:${signature}`;
+  if (timingCache.has(cacheKey)) return timingCache.get(cacheKey);
+  const remember = value=>{
+    if (timingCache.size===256) timingCache.delete(timingCache.keys().next().value);
+    timingCache.set(cacheKey,value);
+    return value;
+  };
+  for (const [entrance,enterFrames] of options(textListEntrances,frames.map(at=>at+1))) {
+    for (const [exit,exitFrames] of options(textListExits,frames.map(at=>title.len-at))) {
+      const holdFrames = title.len-enterFrames-exitFrames;
+      if (holdFrames<0) continue;
+      const timing = {entrance,exit,enterFrames,holdFrames,exitFrames};
+      if (JSON.stringify(Object.entries(textListMotion(timing)).sort(([a],[b])=>a.localeCompare(b)))===signature) return remember(timing);
+    }
+  }
+  return remember(null);
+}
+
+export function retimeTitle(title, edit, fallback=12) {
+  if (!Object.keys(edit).length) return title;
+  const prior = titleTiming(title);
+  const base = prior || {entrance:'cut',exit:'cut',enterFrames:0,holdFrames:title.len,exitFrames:0};
+  const timing = { ...base,...edit };
+  for (const [effect,frames] of [['entrance','enterFrames'],['exit','exitFrames']]) {
+    if (timing[effect]==='cut') timing[frames]=0;
+    else if (edit[effect] && !base[frames] && edit[frames]===undefined) timing[frames]=fallback;
+  }
+  const len = timing.enterFrames+timing.holdFrames+timing.exitFrames;
+  const motion = { ...title.motion };
+  if (prior) for (const key of Object.keys(textListMotion(prior))) delete motion[key];
+  return { ...title,len,motion:{...motion,...textListMotion(timing)},textTiming:timing,
+    typewriter:edit.entrance!==undefined ? false : title.typewriter };
+}
+
 export function titleType(title) {
   const type = title.type || {};
   const caption = title.style === 'caption';

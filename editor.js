@@ -1,5 +1,5 @@
 import { canvasSize, fittedVideoSize, hasVideoFraming, looks, points, presets, properties, resizeMotion, titlePositionOffset, valueAt, videoFit, videoFitModes, videoStretch } from '/motion.mjs';
-import { customGradientStops, extrusionOffsets, fontFamilies, maxExtrusionDepth, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleMaterials, titleType, titleVerticalAnchor, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
+import { customGradientStops, extrusionOffsets, fontFamilies, maxExtrusionDepth, readSrt, retimeTitle, textListEntrances, textListExits, textListMotion, textPresets, titleMaterials, titleTiming, titleType, titleVerticalAnchor, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
 import { soundPresets, soundSettings, soundWave } from '/sound.mjs';
 import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs';
 import { setupUpdates } from '/updates-ui.mjs';
@@ -1044,6 +1044,8 @@ function setupTextList() {
   const sampleLayer = $('text-list-preview-layer');
   const stage = $('text-list-stage');
   const add = $('text-list-add');
+  const line = clip=>clip.text.replaceAll('\n',' ');
+  const timingFields = {entrance:enter,exit,enterFrames:enterTime,holdFrames:holdTime,exitFrames:exitTime};
   fillFontMenu(font,'',true);
   fillMaterialMenu(material,'inherit',true);
   for (const [select,options] of [[enter,textListEntrances],[exit,textListExits]]) {
@@ -1051,69 +1053,95 @@ function setupTextList() {
     select.value = 'fade';
   }
   let styleSource;
+  let editing;
+  let draft;
+  const dirty = new Set();
   let lineCount = 0;
   let animation = 0;
   let previewItems = [];
   let customFill = false;
   let customOutlineColor = false;
   let customDepthColor = false;
-  fill.oninput = () => { customFill = true; material.value = 'solid'; };
+  fill.oninput = () => { customFill = true; material.value = 'solid'; dirty.add(material.id); };
   outlineColor.oninput = () => { customOutlineColor = true; };
   depthColor.oninput = () => { customDepthColor = true; };
 
+  function styleFor(base) {
+    const matchStyle = style.value==='selected' && styleSource;
+    const type = editing ? {...base.type} : matchStyle ? {...styleSource.type} : {};
+    const apply = (...fields)=>!editing || fields.some(field=>dirty.has(field.id));
+    if (apply(font) && installedFonts.has(font.value)) type.family = font.value;
+    const preset = titleMaterials[material.value];
+    if (apply(material) && material.value==='solid') Object.assign(type,{fill:fill.value,gradient:null,material:null});
+    if (apply(material,gradientAngle,...gradientColors) && (preset || material.value==='custom')) {
+      const stops = preset?.stops || (editing && !apply(material,...gradientColors) ? type.gradient?.stops : null) ||
+        gradientColors.map((input,index)=>[index/2,input.value]);
+      const angle = gradientAngle.valueAsNumber;
+      Object.assign(type,{gradient:{stops,angle:Number.isFinite(angle)?angle:preset?.angle ?? 180},material:preset?material.value:null});
+      if (preset && apply(material) && !dirty.has(depthColor.id) && (editing || !customDepthColor)) type.depthColor = preset.side;
+    }
+    for (const [key,input] of [['depth',depth],['depthAngle',depthAngle],['outline',outline]]) {
+      if (apply(input) && Number.isFinite(input.valueAsNumber)) type[key] = input.valueAsNumber;
+    }
+    if (apply(depthColor) && customDepthColor) type.depthColor = depthColor.value;
+    if (apply(outlineColor) && customOutlineColor) type.outlineColor = outlineColor.value;
+    return {style:editing && !apply(style) ? base.style : matchStyle ? (editing ? base.style : styleSource.style) : style.value,
+      ...(Object.keys(type).length ? {type} : {})};
+  }
+
   function plan() {
-    const timing = {
+    const values = {
       entrance:enter.value, exit:exit.value,
       enterFrames:enterTime.disabled ? 0 : Math.round(enterTime.valueAsNumber*fps),
       holdFrames:Math.round(holdTime.valueAsNumber*fps),
       exitFrames:exitTime.disabled ? 0 : Math.round(exitTime.valueAsNumber*fps)
     };
-    const frames = [timing.enterFrames,timing.holdFrames,timing.exitFrames];
-    const len = frames.reduce((sum,count)=>sum+count,0);
-    const validTime = frames.every(count=>Number.isSafeInteger(count) && count>=0 && count<=MAX_DURATION) && len>0;
     const lines = input.value.split('\n');
     const items = lines.map(line=>cleanText(line,901)).filter(Boolean);
-    const matchStyle = style.value==='selected' && styleSource;
-    const type = matchStyle ? {...styleSource.type} : {};
-    if (installedFonts.has(font.value)) type.family = font.value;
-    const preset = titleMaterials[material.value];
-    if (material.value==='solid') Object.assign(type,{fill:fill.value,gradient:null,material:null});
-    if (preset || material.value==='custom') {
-      const stops = preset?.stops || gradientColors.map((input,index)=>[index/2,input.value]);
-      const angle = gradientAngle.valueAsNumber;
-      Object.assign(type,{gradient:{stops,angle:Number.isFinite(angle)?angle:preset?.angle ?? 180},material:preset?material.value:null});
-      if (preset && !customDepthColor) type.depthColor = preset.side;
+    const timing = editing ? Object.fromEntries(Object.entries(values).filter(([key])=>dirty.has(timingFields[key].id))) : values;
+    const validFields = Object.values(timing).every(value=>typeof value==='string' || Number.isSafeInteger(value) && value>=0 && value<=MAX_DURATION);
+    const len = values.enterFrames+values.holdFrames+values.exitFrames;
+    const template = { ...styleFor(styleSource),len,motion:validFields && !editing ? textListMotion(values) : {},textTiming:values };
+    let planned = [];
+    if (validFields && items.length<=500) {
+      if (editing) {
+        const available = new Map();
+        for (const clip of editing) {
+          const key = line(clip);
+          if (!available.has(key)) available.set(key,[]);
+          available.get(key).push(clip);
+        }
+        const matched = items.map(text=>available.get(text)?.shift());
+        const remaining = editing.filter(clip=>!matched.includes(clip));
+        planned = items.map((text,i)=>{
+          const existing = matched[i] || remaining.shift();
+          const base = existing || {...editing[0],id:undefined};
+          return { ...retimeTitle(base,timing),...styleFor(base),text:matched[i]?.text ?? text };
+        });
+      } else planned = items.map(text=>({...template,text}));
     }
-    if (Number.isFinite(depth.valueAsNumber)) type.depth = depth.valueAsNumber;
-    if (Number.isFinite(depthAngle.valueAsNumber)) type.depthAngle = depthAngle.valueAsNumber;
-    if (customDepthColor) type.depthColor = depthColor.value;
-    if (Number.isFinite(outline.valueAsNumber)) type.outline = outline.valueAsNumber;
-    if (customOutlineColor) type.outlineColor = outlineColor.value;
-    const template = {
-      style:matchStyle ? styleSource.style : style.value,
-      ...(Object.keys(type).length ? {type} : {}),
-      len,motion:validTime ? textListMotion(timing) : {}
-    };
     const layer = Number(track.value);
-    const total = len*items.length;
-    const start = validTime && items.length ? freeStart(
-      project.titles.filter(item=>item.style!=='caption' && (item.track || 1)===layer),cursor,total) : cursor;
+    const total = planned.reduce((sum,clip)=>sum+clip.len,0);
+    const ignored = new Set(editing?.map(clip=>clip.id));
+    const peers = project.titles.filter(item=>item.style!=='caption' && (item.track || 1)===layer && !ignored.has(item.id));
+    const start = editing ? editing[0].start : total ? freeStart(peers,cursor,total) : cursor;
     let error = '';
-    if (!validTime) error = 'Enter at least one frame of total duration.';
+    if (!validFields || (!editing && len<1) || planned.some(clip=>clip.len<1)) error = 'Enter at least one frame of total duration.';
     else if (items.length>500) error = 'Add up to 500 titles at a time.';
     else if (items.some(text=>text.length>900)) error = 'Keep each title to 900 characters or fewer.';
     else if (!layer || protectedTrack(project,`title:${layer}`)) error = 'Choose an unlocked title layer.';
+    else if (editing && peers.some(clip=>clip.start<start+total && clip.start+clip.len>start)) error = 'This list would overlap another title. Shorten the timing or choose another layer.';
     else if (start+total>(project.fixedFrames || MAX_DURATION)) error = project.fixedFrames ?
       `The list runs past the fixed end at ${timecode(project.fixedFrames)}. Shorten the timing or change the timeline duration.` :
       'The list would extend the timeline past 24 hours.';
-    return { timing,template,items,lineCount:lines.length,layer,total,start,error };
+    return { timing,template,items,planned,lineCount:lines.length,layer,total,start,error };
   }
 
   function showPreview(frame) {
-    const title = previewItems[Math.floor(frame/(previewItems[0]?.len || 1))];
+    const title = previewItems.find(clip=>{ if (frame<clip.len) return true; frame-=clip.len; return false; });
     sampleLayer.hidden = !title;
     if (!title) return;
-    const local = frame%title.len;
+    const local = frame;
     styleTitle(sample,title,local,stage);
     styleMotion(sampleLayer,title,local);
   }
@@ -1128,7 +1156,8 @@ function setupTextList() {
     enterTime.disabled = enter.value==='cut';
     exitTime.disabled = exit.value==='cut';
     const sequence = plan();
-    const type = titleType(sequence.template);
+    const example = sequence.planned[0] || sequence.template;
+    const type = titleType(example);
     if (!customFill) fill.value = type.fill;
     if (!customOutlineColor) outlineColor.value = type.outlineColor;
     outline.placeholder = String(type.outline);
@@ -1148,11 +1177,10 @@ function setupTextList() {
     status.toggleAttribute('data-error',Boolean(sequence.error));
     status.textContent = sequence.error || (count ? `${count} ${count===1?'title':'titles'} · ${timecode(sequence.total)} · Starts at ${timecode(sequence.start)}` : 'Enter titles to build a sequence.');
     stopPreview();
-    const examples = count ? sequence.items.slice(0,2) : ['Your first title','Your next title'];
-    previewItems = Number.isInteger(sequence.template.len) && sequence.template.len>0 ?
-      examples.map(text=>({...sequence.template,text:text.slice(0,900)})) : [];
+    previewItems = count ? sequence.planned.slice(0,2).filter(clip=>clip.len>0) :
+      Number.isInteger(example.len) && example.len>0 ? ['Your first title','Your next title'].map(text=>({...example,text})) : [];
     play.disabled = !previewItems.length;
-    showPreview(Math.min(sequence.timing.enterFrames,(previewItems[0]?.len ?? 1)-1));
+    showPreview(Math.min(example.textTiming?.enterFrames || 0,(previewItems[0]?.len ?? 1)-1));
   }
   play.onclick = () => {
     if (animation) {
@@ -1160,7 +1188,7 @@ function setupTextList() {
       return;
     }
     let started;
-    const total = previewItems.length*previewItems[0].len;
+    const total = previewItems.reduce((sum,clip)=>sum+clip.len,0);
     play.textContent = 'Stop preview';
     const tick = now => {
       started ??= now;
@@ -1172,38 +1200,54 @@ function setupTextList() {
     animation = requestAnimationFrame(tick);
   };
   input.onscroll = () => { numbers.scrollTop = input.scrollTop; };
-  form.addEventListener('input',update);
+  form.addEventListener('input',event=>{ dirty.add(event.target.id); update(); });
   $('text-list-close').onclick = () => dialog.close();
-  dialog.addEventListener('close',stopPreview);
+  dialog.addEventListener('close',()=>{
+    stopPreview();
+    if (!editing) return;
+    for (const [control,value] of draft.fields) control.value=value;
+    ({customFill,customOutlineColor,customDepthColor}=draft);
+    editing = draft = null;
+  });
   form.onsubmit = event => {
     event.preventDefault();
-    const { template,items,layer,start,error } = plan();
+    const { items,planned,layer,start,error } = plan();
     if (error || !items.length) return update();
-    const clips = items.map((text,index)=>({
-      ...structuredClone(template),id:id(),track:layer,text,start:start+index*template.len
-    }));
+    if (editing?.some(clip=>!guardTrack(trackOf(clip)))) return;
+    const replaced = new Set(editing?.map(clip=>clip.id));
+    const list = editing?.[0].textListId || id();
+    let position = start;
+    const clips = planned.map(clip=>{
+      const next = {...structuredClone(clip),id:clip.id || id(),textListId:list,track:layer,start:position};
+      position+=clip.len;
+      return next;
+    });
     if (!change(()=>{
       project.titleLayers = Math.max(project.titleLayers,layer);
+      if (editing) project.titles = project.titles.filter(clip=>!replaced.has(clip.id));
       project.titles.push(...clips);
       selected = clips[0].id;
     })) return;
+    selectItems(new Set(clips.map(clip=>clip.id)));
+    const wasEditing = Boolean(editing);
     dialog.close();
-    input.value = '';
+    if (!wasEditing) input.value = '';
     setPosition(start);
     revealCursor();
-    notify(`Added ${clips.length} ${clips.length===1?'title':'titles'} from Text List`);
+    notify(wasEditing ? 'Text List updated' : `Added ${clips.length} ${clips.length===1?'title':'titles'} from Text List`);
   };
 
-  return () => {
+  return (list=null) => {
+    if (dialog.open || list?.some(clip=>!guardTrack(trackOf(clip)))) return;
     pause();
     const [width,height] = sequenceSize(project);
     stage.style.setProperty('--text-list-ratio',width/height);
-    const clip = selection();
+    const clip = list?.[0] || selection();
     styleSource = clip && !clip.asset && clip.style!=='caption' ? clip : null;
     style.querySelector('[value=selected]').hidden = !styleSource;
     if (!styleSource && style.value==='selected') style.value = 'center';
     const [kind,number] = (selectedTrack || '').split(':');
-    const preferred = kind==='title' ? Number(number) : styleSource?.track || project.titleLayers;
+    const preferred = list?.[0].track || (kind==='title' ? Number(number) : styleSource?.track || project.titleLayers);
     track.replaceChildren();
     for (let layer=1;layer<=project.titleLayers;layer++) {
       const settings = trackSettings(project,`title:${layer}`);
@@ -1214,6 +1258,31 @@ function setupTextList() {
     if (project.titleLayers<4) track.add(new Option('New title layer',project.titleLayers+1));
     track.value = [...track.options].find(option=>Number(option.value)===preferred && !option.disabled)?.value ??
       [...track.options].find(option=>!option.disabled)?.value ?? '';
+    $('text-list-heading').textContent = list ? 'Edit Text List' : 'Text List';
+    add.textContent = list ? 'Save Text List' : 'Add to timeline';
+    if (list) {
+      draft = {fields:[...form.querySelectorAll('input,select,textarea')].map(control=>[control,control.value]),customFill,customOutlineColor,customDepthColor};
+      editing = list;
+      customFill = customOutlineColor = customDepthColor = false;
+      input.value = list.map(line).join('\n');
+      style.value = 'selected';
+      const type = titleType(clip);
+      fillFontMenu(font,type.family,true);
+      material.value = type.material || (type.gradient?'custom':'solid');
+      fill.value = type.fill;
+      outline.value = type.outline;
+      outlineColor.value = type.outlineColor;
+      depth.value = type.depth;
+      depthAngle.value = type.depthAngle;
+      depthColor.value = type.depthColor;
+      gradientAngle.value = type.gradient?.angle ?? '';
+      for (const [i,control] of gradientColors.entries()) control.value = type.gradient?.stops[i]?.[1] || customGradientStops[i][1];
+      const timing = titleTiming(clip) || {entrance:'cut',exit:'cut',enterFrames:0,holdFrames:clip.len,exitFrames:0};
+      enter.value = timing.entrance;
+      exit.value = timing.exit;
+      for (const [key,control] of [['enterFrames',enterTime],['holdFrames',holdTime],['exitFrames',exitTime]]) control.value = timing[key]/fps;
+    }
+    dirty.clear();
     dialog.showModal();
     update();
     input.focus();
@@ -1229,6 +1298,43 @@ function selection() {
 const isSelected = key => selected===key || selectedGroup.has(key);
 const selectedClips = () => clipsIn(project).filter(clip=>isSelected(clip.id));
 const selectedTitles = () => project.titles.filter(clip=>isSelected(clip.id));
+const textListsByTitle = new Map();
+const expandedTextLists = new Set();
+const collapsedList = key => {
+  const list = textListsByTitle.get(key);
+  return list && !expandedTextLists.has(list[0].textListId) ? list : null;
+};
+
+function selectItems(keys, primary = keys.values().next().value ?? null) {
+  selected = selectionAnchor = primary;
+  selectedGroup = new Set(keys);
+  selectedGroup.delete(primary);
+  refreshSelection();
+}
+
+function selectedTextList(titles) {
+  const list = textListsByTitle.get(titles[0]?.id);
+  return list?.length===titles.length && titles.every(title=>list.includes(title)) ? list : null;
+}
+
+function canGroupTitles(titles) {
+  return titles.length>1 && titles.every((title,i)=>typeof title.text==='string' && title.style!=='caption' && !title.textListId &&
+    (!i || (title.track || 1)===(titles[i-1].track || 1) && title.start===titles[i-1].start+titles[i-1].len));
+}
+
+function setTextListExpanded(list, expanded) {
+  const key = list[0].textListId;
+  if (expanded) expandedTextLists.add(key);
+  else expandedTextLists.delete(key);
+  renderTimeline();
+  if (!expanded && list.some(clip=>isSelected(clip.id))) select(list[0].id);
+}
+
+function groupAsTextList(titles) {
+  if (!canGroupTitles(titles)) return;
+  const key = id();
+  if (editTitles(titles,clip=>{ clip.textListId=key; })) openTextList(titles);
+}
 
 function selectAllTitles() {
   const [first,...others] = sortedTitles();
@@ -1244,6 +1350,17 @@ function clipList(clip) {
 
 function select(key, {toggle=false, range=false, preserve=false} = {}) {
   const items = clipsIn(project);
+  const list = collapsedList(key);
+  if (list && !range) {
+    const keys = new Set(preserve || toggle ? selectedClips().map(clip=>clip.id) : []);
+    const remove = toggle && list.every(clip=>keys.has(clip.id));
+    for (const clip of list) {
+      if (remove) keys.delete(clip.id);
+      else keys.add(clip.id);
+    }
+    selectItems(keys,remove ? keys.values().next().value ?? null : key);
+    return;
+  }
   if (toggle && key) {
     const keys = new Set(selectedClips().map(item=>item.id));
     if (!keys.delete(key)) keys.add(key);
@@ -1270,6 +1387,7 @@ function select(key, {toggle=false, range=false, preserve=false} = {}) {
     selected = key;
     selectionAnchor = key;
   }
+  for (const id of [...selectedGroup,selected]) for (const clip of collapsedList(id) || []) selectedGroup.add(clip.id);
   selectedGroup.delete(selected);
   selectedGroup.delete(null);
   refreshSelection();
@@ -1277,7 +1395,8 @@ function select(key, {toggle=false, range=false, preserve=false} = {}) {
 
 function drawClipSelection(preview) {
   for (const clip of space.querySelectorAll('.clip')) {
-    const active = preview ? preview.has(clip.dataset.id) : isSelected(clip.dataset.id);
+    const keys = clip.textListTitles?.map(item=>item.id) || [clip.dataset.id];
+    const active = keys.some(key=>preview ? preview.has(key) : isSelected(key));
     clip.classList.toggle('selected',active);
     if (!preview) clip.setAttribute('aria-pressed',String(active));
   }
@@ -1318,11 +1437,13 @@ function removeClip(ripple = false) {
   const group = selectedClips();
   if (!clip || group.some(item=>!guardTrack(trackOf(item)))) return;
   change(() => {
-    if(ripple && group.length===1) {
-      const peers=layerItems(clip).filter(item=>item.id!==clip.id && item.start>=clip.start+clip.len);
+    if (ripple && (group.length===1 || selectedTextList(group))) {
+      const start = Math.min(...group.map(item=>item.start));
+      const end = Math.max(...group.map(item=>item.start+item.len));
+      const peers=layerItems(clip).filter(item=>item.start>=end);
       const first=Math.min(Infinity,...peers.map(item=>item.start));
       if(Number.isFinite(first)) {
-        const delta=first-clip.start;
+        const delta=first-start;
         for(const peer of peers) peer.start-=delta;
       }
     }
@@ -1375,8 +1496,13 @@ function pasteGroup(items, at, copies=1) {
       }
     } while (start>at);
     if (repeat===0 && start!==base && copies>1) notify('Placing the copies in the first available space.');
+    const listCopies = new Map();
     for (const clip of items) {
       const duplicate = { ...structuredClone(clip),id:id(),start:start+clip.start-origin };
+      if (clip.textListId) {
+        if (!listCopies.has(clip.textListId)) listCopies.set(clip.textListId,id());
+        duplicate.textListId = listCopies.get(clip.textListId);
+      }
       delete duplicate.extractedFrom;
       added.push(duplicate);
     }
@@ -1416,6 +1542,7 @@ function pasteTimelineClip(at = cursor) {
     .some(item => item.id === clip.id);
   if (!timelineClipboard.cut || originalExists) {
     clip.id = id();
+    if (clip.textListId) clip.textListId = id();
     delete clip.extractedFrom;
   }
   clip.start = freeStart(layerItems(clip), Math.max(0, at), clip.len);
@@ -1580,6 +1707,8 @@ function renderInspector() {
     hint.hidden = true;
     const batch = node('fieldset','title-batch');
     batch.dataset.titleBatch = '';
+    renderTextListActions(batch,titles);
+    renderTitleTiming(batch,titles);
     renderTitlePosition(batch,titles);
     renderTypography(batch,titles,openGroups);
     panel.append(hint,batch);
@@ -1655,6 +1784,8 @@ function renderInspector() {
       clip.start = freeStart(layerItems(clip), clip.start, clip.len, clip.id);
     });
     panel.append(field(clip.style==='caption' ? 'Caption' : 'Text',text));
+    renderTextListActions(panel,[clip]);
+    renderTitleTiming(panel,[clip]);
     renderTitlePosition(panel,[clip]);
     if(clip.style!=='caption') panel.append(field('Title layer',layer));
     panel.append(timing);
@@ -1783,6 +1914,99 @@ function group(label, ...children) {
 function editTitles(titles, update) {
   if (titles.some(clip=>!guardTrack(trackOf(clip)))) return;
   return change(()=>{ for (const clip of titles) update(clip); });
+}
+
+function renderTextListActions(panel,titles) {
+  const list = selectedTextList(titles) || (titles.length===1 ? textListsByTitle.get(titles[0].id) : null);
+  const locked = titles.some(clip=>protectedTrack(project,trackOf(clip)));
+  if (list) {
+    const expanded = expandedTextLists.has(list[0].textListId);
+    const actions = node('div','inline-actions');
+    const edit = button('Edit Text List…',()=>openTextList(list),locked);
+    edit.dataset.editTextList = '';
+    actions.append(edit,
+      button(expanded?'Collapse Text List':'Show individual titles',()=>setTextListExpanded(list,!expanded)));
+    panel.append(actions);
+  } else {
+    const ordered = [...titles].sort((a,b)=>a.start-b.start);
+    if (canGroupTitles(ordered)) panel.append(button('Group as Text List…',()=>groupAsTextList(ordered),locked));
+  }
+}
+
+function renderTitleTiming(panel,titles) {
+  const original = titles.map(title=>titleTiming(title) || { holdFrames:title.len });
+  const form = node('form','title-timing-form');
+  const controls = new Map();
+  const changed = new Set();
+  for (const [effect,frames,presets,label] of [
+    ['entrance','enterFrames',textListEntrances,'Animate in'],['exit','exitFrames',textListExits,'Animate out']
+  ]) {
+    const select = node('select');
+    const known = commonValue(original,value=>value[effect]);
+    if (!known || known===mixed) addMixedOption(select);
+    for (const [key,[name]] of Object.entries(presets)) select.add(new Option(name,key));
+    if (typeof known==='string') select.value = known;
+    controls.set(effect,select);
+    select.oninput = () => {
+      changed.add(effect);
+      const input = controls.get(frames);
+      input.disabled = select.value==='cut';
+      if (!input.disabled && known==='cut' && Number(input.value)===0) input.value = '0.4';
+    };
+    form.append(field(label,select));
+    const input = timingNumber(frames);
+    input.disabled = known==='cut';
+    form.append(field(effect==='entrance'?'In duration (s)':'Out duration (s)',input));
+  }
+  form.append(field('Hold duration (s)',timingNumber('holdFrames')));
+  const submit = button('Apply timing',()=>{});
+  submit.type = 'submit';
+  const status = node('output','subtle');
+  status.setAttribute('role','status');
+  form.append(submit,status);
+  form.onsubmit = event=>{
+    event.preventDefault();
+    if (titles.some(clip=>!guardTrack(trackOf(clip)))) return;
+    const edits = Object.fromEntries([...changed].filter(key=>!controls.get(key).disabled).map(key=>{
+      const input = controls.get(key);
+      return [key,input.tagName==='SELECT' ? input.value : Math.round(input.valueAsNumber*fps)];
+    }).filter(([,value])=>typeof value==='string' || Number.isFinite(value)));
+    if (!Object.keys(edits).length) return;
+    const next = new Map(titles.map(clip=>[clip.id,retimeTitle(clip,edits)]));
+    if ([...next.values()].some(clip=>clip.len<1)) { status.textContent = 'Give each title at least one frame.'; return; }
+    const affected = new Set(titles.map(trackOf));
+    for (const lane of affected) {
+      let end = 0, previous;
+      for (const clip of sortedTitles().filter(clip=>trackOf(clip)===lane)) {
+        const update = next.get(clip.id);
+        if (update && previous && next.has(previous.id) && clip.start===previous.start+previous.len) update.start = end;
+        const item = update || clip;
+        const stop = item.start+item.len;
+        if ((item.start<end && (update || next.has(previous?.id))) || (update && stop>(project.fixedFrames || MAX_DURATION))) {
+          status.textContent = 'This timing would overlap another title or run past the timeline end.';
+          return;
+        }
+        end = stop;
+        previous = clip;
+      }
+    }
+    if (editTitles(titles,clip=>Object.assign(clip,next.get(clip.id)))) notify('Title animation and timing updated');
+  };
+  const section = node('details','property-group title-timing');
+  section.open = true;
+  section.append(node('summary','','Animation & timing'),form);
+  panel.append(section);
+
+  function timingNumber(key) {
+    const input = node('input');
+    input.type='number'; input.min=0; input.max=MAX_DURATION/fps; input.step='any';
+    const frames = commonValue(original,value=>value[key]);
+    if (Number.isFinite(frames)) input.value=frames/fps;
+    else input.placeholder='Mixed';
+    input.oninput=()=>changed.add(key);
+    controls.set(key,input);
+    return input;
+  }
 }
 
 function titleAnchor(clip,axis,type=titleType(clip)) {
@@ -2392,7 +2616,7 @@ function renderTools() {
     const animation=group('Text animations',animations);
     animation.classList.add('text-animations');
     animation.open=previous.get('Text animations') ?? true;
-    tools.append(button('Text List…',openTextList,Boolean(project.timelineLocked)),
+    tools.append(button('Text List…',()=>openTextList(),Boolean(project.timelineLocked)),
       button('Add text',()=>addTitle()),button('Add caption',()=>addTitle(undefined,true)),
       button('Select all text clips',selectAllTitles,!project.titles.length),
       button('Save SRT',()=>void saveSubtitles(),!project.titles.some(item=>item.style==='caption')),
@@ -2908,20 +3132,26 @@ timelinePan.addEventListener('scroll', () => {
   if (scroll.scrollLeft !== timelinePan.scrollLeft) scroll.scrollLeft = timelinePan.scrollLeft;
 });
 
-function makeClip(clip, video) {
+function makeClip(clip, video, textList) {
   const audio=clip.kind==='audio';
   const asset = (video || audio) && bin.get(clip.asset);
-  const label = audio ? asset?.name || 'Missing audio' : video ? asset?.name || 'Missing video' : clip.text;
+  const label = textList ? `Text List · ${textList.length} ${textList.length===1?'title':'titles'}` :
+    audio ? asset?.name || 'Missing audio' : video ? asset?.name || 'Missing video' : clip.text;
   const block = node('div', `clip ${audio ? 'audio-clip' : video ? 'video-clip' : 'title-clip'}`);
   if (clip.composition) block.classList.add('composition-clip');
   if(clip.style==='caption') block.classList.add('caption-clip');
   block.classList.toggle('selected', isSelected(clip.id));
   block.dataset.id = clip.id;
+  if (textList) {
+    block.textListTitles = textList;
+    block.classList.add('text-list-clip');
+    block.ondblclick = ()=>openTextList(textList);
+  }
   block.tabIndex = 0;
   block.setAttribute('role', 'button');
   block.setAttribute('aria-pressed',String(isSelected(clip.id)));
   block.setAttribute('aria-label', `${label}, ${timecode(clip.start)}`);
-  block.title = `${label} · ${timecode(clip.len)}`;
+  block.title = textList ? `${label} · Double-click to edit` : `${label} · ${timecode(clip.len)}`;
   block.style.left = `calc(${clip.start} * var(--frame-width))`;
   block.style.width = `max(2px, calc(${clip.len} * var(--frame-width) - 1px))`;
   block.dataset.frames = clip.len;
@@ -2932,7 +3162,7 @@ function makeClip(clip, video) {
     block.append(film);
   }
   block.append(node('span', 'clip-label', label));
-  for (const side of ['left', 'right']) {
+  for (const side of textList?.length>1 ? [] : ['left', 'right']) {
     const handle = node('span', `trim ${side}`);
     handle.dataset.trim = side;
     handle.title = `Trim ${side === 'left' ? 'start' : 'end'}`;
@@ -2941,7 +3171,8 @@ function makeClip(clip, video) {
   block.addEventListener('focus', () => select(clip.id,{preserve:true}));
   block.addEventListener('keydown', event => {
     if (event.key === 'Enter') {
-      setPosition(clip.start);
+      if (textList) openTextList(textList);
+      else setPosition(clip.start);
       event.preventDefault();
     }
   });
@@ -3064,6 +3295,10 @@ function refreshTrackControls() {
   const reset = $('inspector').querySelector('[data-transform-reset]');
   if (reset && clip) reset.disabled = isProtected || !hasTransformEdits(clip);
   for (const control of $('inspector').querySelectorAll('[data-title-nudge],[data-position-in-preview]')) control.disabled = Boolean(isProtected);
+  const applyTiming = $('inspector').querySelector('.title-timing button');
+  if (applyTiming) applyTiming.disabled = Boolean(isProtected);
+  const editList = $('inspector').querySelector('[data-edit-text-list]');
+  if (editList) editList.disabled = Boolean(isProtected);
   if (isProtected) stopTitlePosition();
 }
 
@@ -3121,6 +3356,7 @@ function renderTimeline() {
   timeline = [...project.clips].sort((a,b)=>a.start-b.start);
   videoEnd = Math.max(0,...timeline.map(clip=>clip.start+clip.len));
   const titles = sortedTitles();
+  textListsByTitle.clear();
   captionOrder=titles.filter(title=>title.style==='caption');
   duration = sequenceDuration(project,contentDuration(project));
   if (selectedGroup.size) {
@@ -3151,7 +3387,16 @@ function renderTimeline() {
     const lane = node('div', 'lane titles');
     lane.dataset.layer = number;
     lane.dataset.type = number===5?'caption':'title';
-    lane.append(...titles.filter(clip => (clip.track || 1) === number).map(clip => makeClip(clip, false)));
+    const members = titles.filter(clip=>(clip.track || 1)===number);
+    for (let i=0;i<members.length;) {
+      const first = members[i++];
+      if (!first.textListId) { lane.append(makeClip(first,false)); continue; }
+      const list = [first];
+      while (members[i]?.textListId===first.textListId && members[i].start===list.at(-1).start+list.at(-1).len) list.push(members[i++]);
+      for (const member of list) textListsByTitle.set(member.id,list);
+      if (expandedTextLists.has(first.textListId)) lane.append(...list.map(clip=>makeClip(clip,false)));
+      else lane.append(makeClip({...first,len:list.at(-1).start+list.at(-1).len-first.start},false,list));
+    }
     $('title-track').append(lane);
   }
   for (let number = project.layers; number >= 1; number--) {
@@ -3650,15 +3895,18 @@ function startClipDrag(event, item, block, video) {
     select(item.id,{toggle:true});
     return;
   }
+  const textList = block.textListTitles?.length>1;
+  if (textList && !isSelected(item.id) && !event.shiftKey) select(item.id);
+  if (textList && event.shiftKey) select(item.id,{range:true});
   const group = selectedClips();
-  const movingGroup = !event.shiftKey && !trim && group.length>1 && isSelected(item.id);
+  const movingGroup = (!event.shiftKey || textList) && !trim && group.length>1 && isSelected(item.id);
   if (!event.shiftKey) select(item.id,{preserve:movingGroup});
   if (protectedTrack(project,trackOf(item)) || (movingGroup && group.some(clip=>protectedTrack(project,trackOf(clip))))) {
     if (event.shiftKey) select(item.id,{range:true});
     setPosition(item.start);
     return;
   }
-  drag = { x: event.clientX, y: event.clientY, frame: frameAt(event.clientX), item, video, trim, block, moved: false, rangeOnClick:event.shiftKey };
+  drag = { x: event.clientX, y: event.clientY, frame: frameAt(event.clientX), item, video, trim, block, moved: false, rangeOnClick:event.shiftKey && !textList };
   if (movingGroup) {
     const keys = new Set(group.map(clip=>clip.id));
     let minimum = -Infinity, maximum = Infinity;
@@ -3671,7 +3919,7 @@ function startClipDrag(event, item, block, video) {
     }
     drag.group = {items:group,keys,minimum,maximum,blocks:[...space.querySelectorAll('.clip')].filter(el=>keys.has(el.dataset.id))};
   }
-  space.setPointerCapture(event.pointerId);
+  (block.textListTitles ? block : space).setPointerCapture(event.pointerId);
 }
 
 function dragClip(event) {
@@ -3757,7 +4005,7 @@ function endClipDrag(cancel = false) {
     });
   } else if (!moved) {
     if (rangeOnClick) select(item.id,{range:true});
-    else if (group) select(item.id);
+    else if (group && !collapsedList(item.id)) select(item.id);
     setPosition(item.start);
   } else if (group) renderTimeline();
 }
@@ -3903,6 +4151,7 @@ function finishSelectionBox(event, cancel = false) {
   }
   drawSelectionBox(box,boxViewport());
   const keys = new Set(clipsIn(project).filter(clip=>box.keys.has(clip.id)).map(clip=>clip.id));
+  for (const key of [...keys]) for (const member of collapsedList(key) || []) keys.add(member.id);
   selected = keys.has(selected) ? selected : [...keys][0] ?? null;
   keys.delete(selected);
   selectedGroup = keys;
@@ -4091,8 +4340,16 @@ space.addEventListener('contextmenu',event=>{
     action('Paste (Ctrl+V)',()=>{setPosition(at);pasteEditorItem();},!timelineClipboard);
     action('Split at playhead',splitClip,!splitPosition());
     action('Make copies…',repeatSelection,locked);
+    const list = textListsByTitle.get(clip.id);
+    if (list) {
+      const expanded = expandedTextLists.has(list[0].textListId);
+      action('Edit Text List…',()=>openTextList(list),locked);
+      action(expanded?'Collapse Text List':'Show individual titles',()=>setTextListExpanded(list,!expanded));
+    } else if (canGroupTitles([...group].sort((a,b)=>a.start-b.start))) {
+      action('Group as Text List…',()=>groupAsTextList([...group].sort((a,b)=>a.start-b.start)),locked);
+    }
     action('Delete · leave gap',()=>removeClip(false),locked);
-    action('Ripple delete · close gap',()=>removeClip(true),locked || group.length>1);
+    action('Ripple delete · close gap',()=>removeClip(true),locked || group.length>1 && !selectedTextList(group));
     if (group.length===1 && isLiveComposition(clip)) action('Open composition',()=>openSequence(clip.composition));
     if(group.length===1 && clip.asset && clip.kind!=='audio' && bin.get(clip.asset)?.audio!=null) action('Extract audio',()=>extractAudio(clip),locked||project.sounds.some(item=>item.extractedFrom===clip.id));
   } else if(lane){

@@ -150,6 +150,11 @@ main#workspace-root { height:calc(100vh - 108px); min-height:380px; display:grid
 .stage.dragging-title, .stage.dragging-title #preview-titles .preview-title { cursor:grabbing; }
 .placing-text #preview-titles .preview-title, .positioning-titles #preview-titles .preview-title { cursor:crosshair; }
 .title-batch { display:grid; gap:10px; min-width:0; margin:0; border:0; padding:0; }
+.title-timing-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; padding:0 7px 8px; }
+.title-timing-form input, .title-timing-form select { min-width:0; }
+.title-timing-form output { grid-column:1/-1; }
+.title-timing-form output:empty { display:none; }
+.text-list-clip { background:#423467; border-color:#aa8ae5; }
 .title-nudges, [data-position-in-preview] { grid-column:1/-1; }
 .title-nudges { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:4px; }
 .mixed-color-control { display:flex; align-items:end; gap:4px; }
