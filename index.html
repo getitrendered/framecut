@@ -219,39 +219,57 @@
   <dialog id="text-list-dialog" aria-labelledby="text-list-heading">
     <form id="text-list-form">
       <div class="dialog-head"><h2 id="text-list-heading">Text List</h2><button id="text-list-close" class="icon" type="button" aria-label="Close Text List">×</button></div>
-      <div class="text-list-layout">
-        <section class="text-list-editor">
-          <label for="text-list-input">Titles</label>
-          <div class="text-list-input-wrap">
-            <pre id="text-list-numbers" aria-hidden="true">1</pre>
-            <textarea id="text-list-input" rows="9" wrap="off" spellcheck="true" aria-describedby="text-list-help" placeholder="Opening line&#10;The next sentence&#10;Final message"></textarea>
+      <div class="text-list-scroll">
+        <div class="text-list-layout">
+          <section class="text-list-editor">
+            <label for="text-list-input">Titles</label>
+            <div class="text-list-input-wrap">
+              <pre id="text-list-numbers" aria-hidden="true">1</pre>
+              <textarea id="text-list-input" rows="9" wrap="off" spellcheck="true" aria-describedby="text-list-help" placeholder="Opening line&#10;The next sentence&#10;Final message"></textarea>
+            </div>
+            <p id="text-list-help" class="subtle">One title per line. Blank lines are skipped.</p>
+            <div class="property-line">
+              <label class="property"><span>Title layer</span><select id="text-list-track" aria-label="Title layer"></select></label>
+              <label class="property"><span>Title style</span><select id="text-list-style" aria-label="Title style"><option value="center">Centered</option><option value="lower">Lower third</option><option value="selected" hidden>Match selected title</option></select></label>
+            </div>
+          </section>
+          <section class="text-list-preview">
+            <div id="text-list-stage" class="text-list-stage" aria-hidden="true">
+              <div id="text-list-preview-layer" class="program-title-layer"><div id="text-list-preview-title" class="preview-title"></div></div>
+            </div>
+            <label class="property"><span>Font</span><select id="text-list-font" aria-label="Font"><option value="">From title style</option></select></label>
+            <button id="text-list-play" class="secondary" type="button" title="Preview the first two titles">Play preview</button>
+          </section>
+        </div>
+        <details class="text-list-appearance" open>
+          <summary>Color, gradients &amp; 3D extrusion</summary>
+          <div class="text-list-appearance-fields">
+            <label class="property"><span>Face material</span><select id="text-list-material" aria-label="Face material"></select></label>
+            <label id="text-list-solid-field" class="property" hidden><span>Face color</span><input id="text-list-fill" type="color" value="#ffffff"></label>
+            <label id="text-list-gradient-field" class="property" hidden><span>Gradient angle (°)</span><input id="text-list-gradient-angle" type="number" min="0" max="360" step="any" placeholder="Preset angle"></label>
+            <label class="property"><span>Extrusion depth (px)</span><input id="text-list-depth" type="number" min="0" max="60" placeholder="0"></label>
+            <label class="property"><span>Extrusion angle (°)</span><input id="text-list-depth-angle" type="number" min="0" max="360" step="any" placeholder="45"></label>
+            <label class="property"><span>Extrusion color</span><input id="text-list-depth-color" type="color" value="#385761"></label>
+            <div id="text-list-gradient-colors" class="text-list-gradient-colors" hidden>
+              <label class="property"><span>Start color</span><input id="text-list-gradient-start" type="color" value="#ffffff"></label>
+              <label class="property"><span>Middle color</span><input id="text-list-gradient-middle" type="color" value="#7ad9ff"></label>
+              <label class="property"><span>End color</span><input id="text-list-gradient-end" type="color" value="#3970c7"></label>
+            </div>
           </div>
-          <p id="text-list-help" class="subtle">One title per line. Blank lines are skipped.</p>
-          <div class="property-line">
-            <label class="property"><span>Title layer</span><select id="text-list-track" aria-label="Title layer"></select></label>
-            <label class="property"><span>Title style</span><select id="text-list-style" aria-label="Title style"><option value="center">Centered</option><option value="lower">Lower third</option><option value="selected" hidden>Match selected title</option></select></label>
-          </div>
-        </section>
-        <section class="text-list-preview">
-          <div id="text-list-stage" class="text-list-stage" aria-hidden="true">
-            <div id="text-list-preview-layer" class="program-title-layer"><div id="text-list-preview-title" class="preview-title"></div></div>
-          </div>
-          <label class="property"><span>Font</span><select id="text-list-font" aria-label="Font"><option value="">From title style</option></select></label>
-          <button id="text-list-play" class="secondary" type="button" title="Preview the first two titles">Play preview</button>
-        </section>
-      </div>
-      <div class="text-list-timing">
-        <fieldset><legend>Entrance</legend>
-          <label class="property"><span>Animate in</span><select id="text-list-enter" aria-label="Animate in"></select></label>
-          <label class="property"><span>In duration (s)</span><input id="text-list-enter-time" type="number" min="0" max="86400" step="any" value="0.4" required></label>
-        </fieldset>
-        <fieldset><legend>Hold</legend>
-          <label class="property"><span>Hold duration (s)</span><input id="text-list-hold" type="number" min="0" max="86400" step="any" value="2" required></label>
-        </fieldset>
-        <fieldset><legend>Exit</legend>
-          <label class="property"><span>Animate out</span><select id="text-list-exit" aria-label="Animate out"></select></label>
-          <label class="property"><span>Out duration (s)</span><input id="text-list-exit-time" type="number" min="0" max="86400" step="any" value="0.4" required></label>
-        </fieldset>
+        </details>
+        <div class="text-list-timing">
+          <fieldset><legend>Entrance</legend>
+            <label class="property"><span>Animate in</span><select id="text-list-enter" aria-label="Animate in"></select></label>
+            <label class="property"><span>In duration (s)</span><input id="text-list-enter-time" type="number" min="0" max="86400" step="any" value="0.4" required></label>
+          </fieldset>
+          <fieldset><legend>Hold</legend>
+            <label class="property"><span>Hold duration (s)</span><input id="text-list-hold" type="number" min="0" max="86400" step="any" value="2" required></label>
+          </fieldset>
+          <fieldset><legend>Exit</legend>
+            <label class="property"><span>Animate out</span><select id="text-list-exit" aria-label="Animate out"></select></label>
+            <label class="property"><span>Out duration (s)</span><input id="text-list-exit-time" type="number" min="0" max="86400" step="any" value="0.4" required></label>
+          </fieldset>
+        </div>
       </div>
       <div class="text-list-footer">
         <output id="text-list-status" class="subtle" role="status"></output>

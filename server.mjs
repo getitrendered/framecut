@@ -11,7 +11,8 @@ import { homedir } from 'node:os';
 import { expression, hasVideoFraming, points, properties, videoFit, videoStretch } from './motion.mjs';
 import { exportRange, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
-import { fontFamilies, textCharacters, textFragment, titleType, typewriterStep, typographyText, usesTextReveal, wrapText } from './text.mjs';
+import { extrusionOffsets, textCharacters, textFragment, titleType, typewriterStep, typographyText, usesTextReveal, wrapText } from './text.mjs';
+import { installedFontNames, stageTitleFont } from './fonts.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
 import { clipMix, trackOf, trackSettings } from './tracks.mjs';
@@ -687,18 +688,22 @@ function readTimeline(project) {
     trackSettings:project.trackSettings,masterMuted:project.masterMuted,masterGainDb:project.masterGainDb };
 }
 
-function divideTimeline(inputs, start, end) {
+function divideTimeline(inputs, start, end, cost = () => 1) {
   const relevant = inputs.filter(clip=>clip.start<end && clip.start+clip.len>start)
     .sort((a,b)=>a.start-b.start);
   const sections = [];
   let sectionInputs = [];
+  let units = 0;
   for (const clip of relevant) {
-    if (clip.start>start && sectionInputs.length>=renderInputLimit) {
+    const weight = cost(clip);
+    if (clip.start>start && units+weight>renderInputLimit) {
       sections.push({start,end:clip.start});
       start = clip.start;
       sectionInputs = sectionInputs.filter(item=>item.start+item.len>start);
+      units = sectionInputs.reduce((sum,item)=>sum+cost(item),0);
     }
     sectionInputs.push(clip);
+    units += weight;
   }
   sections.push({start,end});
   return sections;
@@ -764,21 +769,23 @@ async function render(job, project, timeline) {
     const audioEncoding = ['-c:a',webm?'libopus':'aac','-b:a',bitrate];
     const muxOptions = webm ? [] : ['-movflags','+faststart'];
     const output = `video.${job.format}`;
+    const fonts = new Map();
     const titles = timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
     const inputs = [...timeline.clips,...timeline.overlays,...timeline.sounds,...titles];
+    const renderCost = clip => clip.type?.gradient || clip.type?.depth>14 ? 4 : 1;
     const stage = job.composition ? 'Rendering composition' : 'Rendering video';
     const report = (done, ceiling) => {
       job.progress = Math.min(ceiling,Math.round(done/range.frames*ceiling));
       taskStage(stage,job.progress);
     };
-    if (inputs.length<=renderInputLimit) {
-      await renderSection(folder,project,timeline,range,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99));
+    if (inputs.reduce((count,clip)=>count+renderCost(clip),0)<=renderInputLimit) {
+      await renderSection(folder,project,timeline,range,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99),fonts);
     } else {
-      const sections = divideTimeline(inputs,range.start,range.end);
+      const sections = divideTimeline(inputs,range.start,range.end,renderCost);
       await withRenderSections(folder,sections,'nut',async(file,section)=>{
         const part = timelineSection(timeline,section);
         await renderSection(folder,project,part,{start:0,end:part.total,frames:part.total},file,
-          [...videoEncoding,'-c:a','pcm_f32le'],true,frame=>report(section.start-range.start+frame,95));
+          [...videoEncoding,'-c:a','pcm_f32le'],true,frame=>report(section.start-range.start+frame,95),fonts);
       },async list=>{
         job.progress = 96;
         await runTimed(['-nostdin','-v','error','-f','concat','-i',list,'-map','0:v:0','-map','0:a:0','-c:v','copy',
@@ -794,7 +801,7 @@ async function render(job, project, timeline) {
   }
 }
 
-async function renderSection(folder, project, timeline, range, output, encoding, batch, onFrame) {
+async function renderSection(folder, project, timeline, range, output, encoding, batch, onFrame, fonts) {
   const { clips, overlays, videoFrames, total } = timeline;
   const titles=timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
   const [outputWidth, outputHeight] = sequenceSize(project);
@@ -838,7 +845,6 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     video = `layered${index}`;
   }
   audioFilter(args,filter,timeline,{reuse:true,batch,limit:!batch});
-  const fonts=new Set();
   const captions=titles.filter(title=>title.style==='caption').sort((a,b)=>a.start-b.start);
   const captionSegments=[];
   let captionEnd=0;
@@ -853,12 +859,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     const visibleLength=next ? Math.min(title.len,next.start-title.start):title.len;
     if(visibleLength<=0) continue;
     const type=titleType(title);
-    const font=fontFamilies[type.family][type.weight];
-    if(!fonts.has(font)){
-      const system=join(process.env.WINDIR || 'C:/Windows','Fonts');
-      await writeFile(join(folder,font),await readFile(join(system,font)).catch(()=>readFile(join(system,'segoeuib.ttf'))));
-      fonts.add(font);
-    }
+    const font=await stageTitleFont(folder,fonts,type);
     const size=height*type.size/100;
     const units=height/1080;
     const maxColumns=Math.max(12,Math.floor(width*.84/(size*(.56+type.tracking*.08))));
@@ -874,7 +875,9 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     const fontSize=Math.max(8,Math.round(Math.min(size,width*.86/(longest*(.56+type.tracking*.08)))));
     const x=type.align==='left' ? 'w*0.075' : type.align==='right' ? 'w*0.925-tw' : '(w-tw)/2';
     const y=title.style==='caption' ? 'h*0.91-th' : title.style==='lower' ? 'h*0.87-th' : '(h-th)/2';
-    const draw=[], shadow=[];
+    const draw=[], shadow=[], mask=[];
+    const depth = [...new Set(extrusionOffsets(type).map(([x,y])=>`${Math.round(x*units)},${Math.round(y*units)}`))]
+      .filter(pair=>pair!=='0,0').map(pair=>pair.split(','));
     const color=(hex,alpha=100)=>`0x${hex.slice(1)}@${(alpha/100).toFixed(3)}`;
     for (let part = 0; part < count && (reveal || part*step<sourceLength); part++) {
       const file = `title-${i}-${part}.txt`;
@@ -885,16 +888,34 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       const base=`drawtext=fontfile=${font}:textfile=${file}:expansion=none:fontsize=${fontSize}:line_spacing=${Math.round(fontSize*(type.leading-1))}:text_align=${type.align}:enable='${enable}'`;
       if(type.shadow) shadow.push(`${base}:fontcolor=black@${type.shadow/100}:x=(${x})+(${Math.round(type.shadowX*units)}):y=(${y})+(${Math.round(type.shadowY*units)})`);
       const box=type.boxOpacity ? `:box=1:boxcolor=${color(type.background,type.boxOpacity)}:boxborderw=${Math.round(type.padding*units)}` : '';
-      if(box && type.depth) draw.push(`${base}:fontcolor=white@0:x=${x}:y=${y}${box}`);
-      for(let depth=type.depth;depth>0;depth--) {
-        const offset=Math.max(1,Math.round(depth*units));
-        draw.push(`${base}:fontcolor=${color(type.depthColor)}:x=(${x})+${offset}:y=(${y})+${offset}`);
+      if(box && depth.length) draw.push(`${base}:fontcolor=white@0:x=${x}:y=${y}${box}`);
+      for (const [dx,dy] of depth) {
+        draw.push(`${base}:fontcolor=${color(type.depthColor)}:x=(${x})+(${dx}):y=(${y})+(${dy})`);
       }
-      draw.push(`${base}:fontcolor=${color(type.fill)}:borderw=${Math.round(type.outline*units)}:bordercolor=${color(type.outlineColor)}:x=${x}:y=${y}${type.depth ? '' : box}`);
+      const border = Math.round(type.outline*units);
+      if (!type.gradient || border || box) {
+        const fill = !type.gradient ? color(type.fill) : border ? color(type.outlineColor) : 'white@0';
+        draw.push(`${base}:fontcolor=${fill}:borderw=${border}:bordercolor=${color(type.outlineColor)}:x=${x}:y=${y}${depth.length?'':box}`);
+      }
+      if (type.gradient) mask.push(`${base}:fontcolor=white:x=${x}:y=${y}`);
     }
     if(shadow.length && type.blur) shadow.push(`gblur=sigma=${Math.max(.1,type.blur*units)}:planes=8`);
-    const chain=[...shadow,...draw,...motionFilters(title),`setpts=PTS+${caption?0:title.start}/(${fps}*TB)`];
-    filter.push(`color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength},${chain.join(',')}[title${i}]`);
+    const canvas = `color=c=black@0:s=${width}x${height}:r=${fps},format=yuva420p,trim=end_frame=${visibleLength}`;
+    const finish = [...motionFilters(title),`setpts=PTS+${caption?0:title.start}/(${fps}*TB)`].join(',');
+    if (type.gradient) {
+      const faceWidth = Math.min(width*.9,longest*fontSize*(.56+type.tracking*.08));
+      const faceHeight = fontSize*(.78+(wrapped.split('\n').length-1)*type.leading);
+      const cx = type.align==='left' ? width*.075+faceWidth/2 : type.align==='right' ? width*.925-faceWidth/2 : width/2;
+      const cy = caption ? height*.91-faceHeight/2 : title.style==='lower' ? height*.87-faceHeight/2 : height/2;
+      const paint = gradientPaint(type.gradient,cx,cy,faceWidth,faceHeight);
+      filter.push([canvas,...shadow,...draw].join(',')+`[under${i}]`);
+      filter.push([canvas,...mask,'alphaextract'].join(',')+`[mask${i}]`);
+      filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=1,format=gbrp,${paint},loop=loop=${visibleLength-1}:size=1:start=0,setpts=N/(${fps}*TB)[paint${i}]`);
+      filter.push(`[paint${i}][mask${i}]alphamerge[face${i}]`);
+      filter.push(`[under${i}][face${i}]overlay=format=auto:shortest=1,${finish}[title${i}]`);
+    } else {
+      filter.push([canvas,...shadow,...draw,finish].join(',')+`[title${i}]`);
+    }
     if (!caption) {
       composite(filter,video,`title${i}`,title,title.start,`titled${i}`,width,height);
       video = `titled${i}`;
@@ -931,6 +952,24 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       if (match) onFrame(Number(match[1]));
     }
   } });
+}
+
+function gradientPaint(gradient,cx,cy,width,height) {
+  const radians = gradient.angle*Math.PI/180;
+  const dx = Math.sin(radians), dy = -Math.cos(radians);
+  const span = Math.max(1,Math.abs(dx*width)+Math.abs(dy*height));
+  const at = `(0.5+((X-${cx})*${dx.toFixed(8)}+(Y-${cy})*${dy.toFixed(8)})/${span})`;
+  function colorChannel(index) {
+    const stops = gradient.stops.map(([position,color])=>[position,parseInt(color.slice(1+index*2,3+index*2),16)]);
+    let value = String(stops.at(-1)[1]);
+    for (let i=stops.length-1;i>0;i--) {
+      const [end,to] = stops[i];
+      const [start,from] = stops[i-1];
+      value = `if(lte(${at},${end}),${from}+(${to-from})*clip((${at}-${start})/${end-start},0,1),${value})`;
+    }
+    return value;
+  }
+  return 'geq='+['r','g','b'].map((key,index)=>`${key}='${colorChannel(index)}'`).join(':');
 }
 
 function changed(clip,key) { return points(clip,key).some(([,value]) => value !== properties[key][3]); }
@@ -1078,6 +1117,7 @@ const server = createServer(async (req, res) => {
       if (path === '/api/tasks') return json(res,200,activityList());
       if (path === '/api/luts') return json(res, 200, [...luts.values()]);
       if (path === '/api/tools') return json(res,200,{ objectRemoval:aiReady, transcription:Boolean(whisperHome) });
+      if (path === '/api/fonts') return json(res,200,await installedFontNames());
       const sound=/^\/media\/([a-f\d-]+)\/audio\.wav$/.exec(path);
       if(sound && assets.has(sound[1]) && assets.get(sound[1]).audio !== null) return await serveFile(req,res,await audioPreview(assets.get(sound[1])),'audio/wav');
       const program = /^\/media\/([a-f\d-]+)\/p-(auto|full|half|quarter|low)(?:-([a-f\d-]+))?\.(mp4|webm)$/.exec(path);

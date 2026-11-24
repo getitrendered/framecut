@@ -10,6 +10,48 @@ export const fontFamilies = {
   Verdana: ['verdana.ttf','verdanab.ttf','verdanai.ttf','verdanaz.ttf']
 };
 
+const material = (label, group, stops, side, angle=180) => ({label,group,stops,side,angle});
+
+export const titleMaterials = {
+  gold:material('Gold','Metals',[[0,'#fff3ac'],[.32,'#d38f16'],[.47,'#fff8bd'],[.55,'#fff0a0'],[.62,'#9c5e08'],[1,'#eabb44']],'#714209'),
+  silver:material('Silver','Metals',[[0,'#f6fbff'],[.33,'#a4afbd'],[.49,'#ffffff'],[.58,'#c5d0de'],[1,'#737d8b']],'#535e6b'),
+  chrome:material('Chrome','Metals',[[0,'#414857'],[.25,'#b7c7e6'],[.47,'#f8fcff'],[.51,'#313b59'],[.74,'#7a90b5'],[1,'#e5f2ff']],'#34435c'),
+  copper:material('Copper','Metals',[[0,'#ffe0c4'],[.29,'#b86c42'],[.49,'#ffc8a6'],[.62,'#8e482b'],[1,'#e28a57']],'#672d1a'),
+  rose:material('Rose gold','Metals',[[0,'#ffe1dc'],[.28,'#bf7272'],[.49,'#fff2e7'],[.62,'#ab5e61'],[1,'#e6a49c']],'#773f46'),
+  bronze:material('Bronze','Metals',[[0,'#e9bc85'],[.3,'#88552f'],[.5,'#f1cc98'],[.65,'#654025'],[1,'#c2874f']],'#51311c'),
+  steel:material('Blue steel','Metals',[[0,'#d8ecf7'],[.35,'#66839d'],[.49,'#e6f8ff'],[.63,'#34536f'],[1,'#91b7cf']],'#283c50'),
+  gunmetal:material('Gunmetal','Metals',[[0,'#adb7c4'],[.28,'#434b59'],[.49,'#c1c8cf'],[.61,'#232a34'],[1,'#6e7987']],'#212832'),
+  pearl:material('Pearl','Gradients',[[0,'#ffffff'],[.48,'#f5e5ff'],[1,'#badbed']],'#605370'),
+  sunset:material('Sunset','Gradients',[[0,'#ffdf71'],[.5,'#ff716a'],[1,'#ce367d']],'#692946',140),
+  ocean:material('Ocean','Gradients',[[0,'#a4ffff'],[.48,'#26b7d4'],[1,'#2450a8']],'#193a67',150),
+  aurora:material('Aurora','Gradients',[[0,'#b6ffba'],[.55,'#4fe0c3'],[1,'#8e74ed']],'#304769',135),
+  berry:material('Berry','Gradients',[[0,'#ffc1f3'],[.52,'#db589b'],[1,'#7836a3']],'#492451'),
+  fire:material('Ember','Gradients',[[0,'#ffe77a'],[.43,'#ff962f'],[1,'#ce2b35']],'#732124'),
+  ice:material('Ice','Gradients',[[0,'#ffffff'],[.44,'#b8ecff'],[1,'#608bde']],'#365d8d'),
+  neon:material('Electric','Gradients',[[0,'#70ffff'],[.52,'#919aff'],[1,'#ff6ce6']],'#50387d',125),
+  lavender:material('Lavender','Gradients',[[0,'#f3deff'],[.46,'#c3a9f6'],[1,'#7861c5']],'#4a3b7c'),
+  lime:material('Citrus','Gradients',[[0,'#fff982'],[.52,'#b5ef48'],[1,'#45b764']],'#386539',145)
+};
+
+export const customGradientStops = [[0,'#ffffff'],[.5,'#7ad9ff'],[1,'#3970c7']];
+export const maxExtrusionDepth = 60;
+
+export function titleGradient(value) {
+  if (!Array.isArray(value?.stops)) return null;
+  const stops = [...new Map(value.stops.slice(0,8).filter(pair=>Array.isArray(pair) && Number.isFinite(pair[0]) &&
+    typeof pair[1]==='string' && /^#[\da-f]{6}$/i.test(pair[1]))
+    .map(([at,color])=>[Math.max(0,Math.min(1,at)),color]))].sort(([a],[b])=>a-b);
+  if (stops.length<2) return null;
+  const angle = Number.isFinite(value.angle) ? ((value.angle%360)+360)%360 : 180;
+  return {stops,angle};
+}
+
+export function extrusionOffsets(type) {
+  const radians = type.depthAngle*Math.PI/180;
+  const x = Math.cos(radians)*Math.SQRT2, y = Math.sin(radians)*Math.SQRT2;
+  return Array.from({length:type.depth},(_,i)=>[(type.depth-i)*x,(type.depth-i)*y]);
+}
+
 export const textPresets = {
   'Lecture opener': { text:'Research seminar\nTopic · Presenter', style:'center', type:{ family:'Georgia',size:7.5,leading:1.22,weight:1 } },
   'Section heading': { text:'01  Introduction', style:'center', type:{ family:'Segoe UI',size:6.6,weight:1,tracking:1 } },
@@ -77,7 +119,8 @@ export function titleType(title) {
   const color = (key, fallback) => /^#[\da-f]{6}$/i.test(type[key]) ? type[key] : fallback;
   const number = (key, fallback, min, max) => Number.isFinite(type[key]) ? Math.max(min,Math.min(max,type[key])) : fallback;
   return {
-    family: Object.hasOwn(fontFamilies,type.family) ? type.family : 'Segoe UI',
+    family: typeof type.family==='string' && type.family.trim() && type.family.length<=200 && !/\p{Cc}/u.test(type.family)
+      ? type.family : 'Segoe UI',
     weight: Math.round(number('weight',1,0,3)),
     size: number('size', caption ? 4.6 : title.style === 'lower' ? 6.3 : 8.9,1.5,20),
     align: ['left','center','right'].includes(type.align) ? type.align : title.style === 'lower' ? 'left' : 'center',
@@ -93,7 +136,10 @@ export function titleType(title) {
     blur: number('blur',6,0,48),
     shadowX: number('shadowX',2,-60,60),
     shadowY: number('shadowY',4,-60,60),
-    depth: Math.round(number('depth',0,0,14)),
+    gradient: titleGradient(type.gradient),
+    material: typeof type.material==='string' && Object.hasOwn(titleMaterials,type.material) ? type.material : null,
+    depth: Math.round(number('depth',0,0,maxExtrusionDepth)),
+    depthAngle: number('depthAngle',45,0,360),
     depthColor: color('depthColor','#385761'),
     case: ['upper','lower'].includes(type.case) ? type.case : 'normal'
   };

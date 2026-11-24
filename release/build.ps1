@@ -33,7 +33,7 @@ Expand-Archive -LiteralPath $engine -DestinationPath $whisperExtract -Force
 $app = Join-Path $stage 'resources\app'
 $speech = Join-Path $app 'whisper'
 New-Item -ItemType Directory -Force -Path $speech | Out-Null
-$appFiles = @('activity.mjs','desktop.mjs','editor.js','framecut.ico','graphics.mjs','index.html','layout.mjs','led.mjs','loop.mjs',
+$appFiles = @('activity.mjs','desktop.mjs','editor.js','fonts.mjs','framecut.ico','graphics.mjs','index.html','layout.mjs','led.mjs','loop.mjs',
     'motion.mjs','package.json','preload.cjs','projects.css','projects.mjs','remove_object.py','sequences.mjs','server.mjs','sound.mjs','style.css','text.mjs',
     'tracks.mjs','update-config.json','updater.mjs','updates-ui.mjs','workspace.css')
 foreach($file in $appFiles) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $app }

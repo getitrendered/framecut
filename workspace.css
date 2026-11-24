@@ -174,6 +174,8 @@ main#workspace-root { height:calc(100vh - 108px); min-height:380px; display:grid
 .stage.track-picking { cursor:crosshair; touch-action:none; }
 .preview-title { margin:0; }
 #text-list-dialog { width:min(860px,calc(100% - 28px)); }
+#text-list-form { display:flex; flex-direction:column; max-height:calc(100dvh - 78px); }
+.text-list-scroll { display:grid; align-content:start; gap:12px; min-height:0; overflow:auto; padding:2px; scrollbar-gutter:stable; }
 .text-list-layout { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(200px,1fr); gap:16px; }
 .text-list-editor, .text-list-preview { display:grid; gap:8px; align-content:start; min-width:0; }
 .text-list-editor > label { font-weight:600; }
@@ -187,10 +189,17 @@ main#workspace-root { height:calc(100vh - 108px); min-height:380px; display:grid
 .text-list-timing { display:grid; grid-template-columns:1fr 1fr 1fr; gap:9px; }
 .text-list-timing fieldset { min-width:0; margin:0; display:grid; align-content:start; gap:8px; border:1px solid #3c4c54; border-radius:7px; padding:9px; }
 .text-list-timing legend { padding:0 4px; font-weight:600; }
-.text-list-footer { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.text-list-appearance { border:1px solid #3c4c54; border-radius:7px; }
+.text-list-appearance summary { cursor:pointer; font-weight:600; padding:9px 10px; }
+.text-list-appearance-fields, .text-list-gradient-colors { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.text-list-appearance-fields { padding:0 10px 10px; }
+.text-list-gradient-colors { grid-column:1/-1; }
+.text-list-appearance-fields input[type=color] { min-height:32px; padding:3px; }
+.text-list-footer { flex:none; display:flex; justify-content:space-between; align-items:center; gap:12px; }
 .text-list-footer button { flex:none; }
 #text-list-status[data-error] { color:#ffc3a8; }
 @media (max-width:700px) { .text-list-layout { grid-template-columns:minmax(0,1fr); } .text-list-stage { --text-list-preview-height:110px; } }
+.preview-title.gradient-title::after { content:attr(data-title-face); position:absolute; inset:var(--title-padding,0px); color:transparent; background:var(--title-face-gradient); background-clip:text; text-shadow:none; -webkit-text-stroke:0; white-space:inherit; }
 .overlay-lane { background-color:#17242a; }
 .tool-select { width:100%; }
 @media (max-width:1100px) {

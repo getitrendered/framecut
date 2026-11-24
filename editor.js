@@ -1,5 +1,5 @@
 import { canvasSize, fittedVideoSize, hasVideoFraming, looks, points, presets, properties, resizeMotion, valueAt, videoFit, videoFitModes, videoStretch } from '/motion.mjs';
-import { fontFamilies, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleType, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
+import { customGradientStops, extrusionOffsets, fontFamilies, maxExtrusionDepth, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleMaterials, titleType, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
 import { soundPresets, soundSettings, soundWave } from '/sound.mjs';
 import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs';
 import { setupUpdates } from '/updates-ui.mjs';
@@ -10,6 +10,7 @@ import { createLedWorkspace } from '/led.mjs';
 import '/layout.mjs';
 const $ = id => document.getElementById(id);
 const fps = 30;
+const installedFonts = new Set(Object.keys(fontFamilies));
 const mediaDragType = 'application/x-framecut-asset';
 const importedAudioDragType = 'application/x-framecut-audio-asset';
 const storageKey = 'framecut-project-v1';
@@ -881,6 +882,35 @@ function addTitle(preset, caption=false) {
   $('title-text')?.select();
 }
 
+function fillFontMenu(menu,value,inherit=false) {
+  menu.replaceChildren();
+  if (inherit) menu.add(new Option('From title style',''));
+  for (const family of [...installedFonts].sort((a,b)=>a.localeCompare(b))) {
+    const option = new Option(family,family);
+    option.style.fontFamily = JSON.stringify(family);
+    menu.add(option);
+  }
+  if (value && !installedFonts.has(value)) menu.add(new Option(value+' (unavailable)',value));
+  menu.value = value;
+}
+
+function fillMaterialMenu(menu, value, inherit = false) {
+  if (inherit) menu.add(new Option('From title style','inherit'));
+  menu.add(new Option('Solid color','solid'));
+  menu.add(new Option('Custom gradient','custom'));
+  const groups = new Map();
+  for (const [key,material] of Object.entries(titleMaterials)) {
+    if (!groups.has(material.group)) {
+      const group = node('optgroup');
+      group.label = material.group;
+      groups.set(material.group,group);
+      menu.append(group);
+    }
+    groups.get(material.group).append(new Option(material.label,key));
+  }
+  menu.value = value;
+}
+
 function setupTextList() {
   const dialog = $('text-list-dialog');
   const form = $('text-list-form');
@@ -889,6 +919,13 @@ function setupTextList() {
   const track = $('text-list-track');
   const style = $('text-list-style');
   const font = $('text-list-font');
+  const material = $('text-list-material');
+  const fill = $('text-list-fill');
+  const gradientAngle = $('text-list-gradient-angle');
+  const gradientColors = ['start','middle','end'].map(name=>$('text-list-gradient-'+name));
+  const depth = $('text-list-depth');
+  const depthAngle = $('text-list-depth-angle');
+  const depthColor = $('text-list-depth-color');
   const enter = $('text-list-enter');
   const exit = $('text-list-exit');
   const enterTime = $('text-list-enter-time');
@@ -900,11 +937,8 @@ function setupTextList() {
   const sampleLayer = $('text-list-preview-layer');
   const stage = $('text-list-stage');
   const add = $('text-list-add');
-  for (const family of Object.keys(fontFamilies)) {
-    const option = new Option(family,family);
-    option.style.fontFamily = family;
-    font.add(option);
-  }
+  fillFontMenu(font,'',true);
+  fillMaterialMenu(material,'inherit',true);
   for (const [select,options] of [[enter,textListEntrances],[exit,textListExits]]) {
     for (const [value,[label]] of Object.entries(options)) select.add(new Option(label,value));
     select.value = 'fade';
@@ -913,6 +947,8 @@ function setupTextList() {
   let lineCount = 0;
   let animation = 0;
   let previewItems = [];
+  let customDepthColor = false;
+  depthColor.oninput = () => { customDepthColor = true; };
 
   function plan() {
     const timing = {
@@ -928,7 +964,18 @@ function setupTextList() {
     const items = lines.map(line=>cleanText(line,901)).filter(Boolean);
     const matchStyle = style.value==='selected' && styleSource;
     const type = matchStyle ? {...styleSource.type} : {};
-    if (Object.hasOwn(fontFamilies,font.value)) type.family = font.value;
+    if (installedFonts.has(font.value)) type.family = font.value;
+    const preset = titleMaterials[material.value];
+    if (material.value==='solid') Object.assign(type,{fill:fill.value,gradient:null,material:null});
+    if (preset || material.value==='custom') {
+      const stops = preset?.stops || gradientColors.map((input,index)=>[index/2,input.value]);
+      const angle = gradientAngle.valueAsNumber;
+      Object.assign(type,{gradient:{stops,angle:Number.isFinite(angle)?angle:preset?.angle ?? 180},material:preset?material.value:null});
+      if (preset && !customDepthColor) type.depthColor = preset.side;
+    }
+    if (Number.isFinite(depth.valueAsNumber)) type.depth = depth.valueAsNumber;
+    if (Number.isFinite(depthAngle.valueAsNumber)) type.depthAngle = depthAngle.valueAsNumber;
+    if (customDepthColor) type.depthColor = depthColor.value;
     const template = {
       style:matchStyle ? styleSource.style : style.value,
       ...(Object.keys(type).length ? {type} : {}),
@@ -968,7 +1015,15 @@ function setupTextList() {
     enterTime.disabled = enter.value==='cut';
     exitTime.disabled = exit.value==='cut';
     const sequence = plan();
-    font.style.fontFamily = titleType(sequence.template).family;
+    const type = titleType(sequence.template);
+    font.style.fontFamily = JSON.stringify(type.family);
+    $('text-list-solid-field').hidden = material.value!=='solid';
+    $('text-list-gradient-field').hidden = material.value==='solid' || material.value==='inherit';
+    $('text-list-gradient-colors').hidden = material.value!=='custom';
+    gradientAngle.placeholder = String(titleMaterials[material.value]?.angle ?? 180);
+    depth.placeholder = String(type.depth);
+    depthAngle.placeholder = String(type.depthAngle);
+    if (!customDepthColor) depthColor.value = type.depthColor;
     if (lineCount!==sequence.lineCount) {
       lineCount = sequence.lineCount;
       numbers.textContent = Array.from({length:Math.min(501,lineCount)},(_,i)=>i+1).join('\n');
@@ -1567,19 +1622,47 @@ function renderTypography(panel, clip,openGroups) {
   const set=(key,value)=>change(()=>{ (clip.type ||= {})[key]=value; });
   const n=(key,label,min,max,step=1)=>numberControl(label,type[key],min,max,step,value=>set(key,value));
   const c=(key,label)=>colorControl(label,type[key],value=>set(key,value));
+  const menu = node('select');
+  menu.dataset.titleFont = '';
+  fillFontMenu(menu,type.family);
+  menu.onchange = () => set('family',menu.value);
   const font=group('Typography',
-    choice('Font',Object.keys(fontFamilies).map(name=>[name,name]),type.family,v=>set('family',v)),
+    field('Font',menu),
     choice('Weight & style',[[0,'Regular'],[1,'Bold'],[2,'Italic'],[3,'Bold italic']],type.weight,v=>set('weight',Number(v))),
     n('size','Size (% of frame)',1.5,20,.1),n('leading','Line height',.8,2.6,.05),
     choice('Alignment',[['left','Left'],['center','Center'],['right','Right']],type.align,v=>set('align',v)),
-    n('tracking','Letter spacing',0,3),choice('Letter case',[['normal','As written'],['upper','Uppercase'],['lower','Lowercase']],type.case,v=>set('case',v)),c('fill','Text color'));
+    n('tracking','Letter spacing',0,3),choice('Letter case',[['normal','As written'],['upper','Uppercase'],['lower','Lowercase']],type.case,v=>set('case',v)));
   font.open=true;
-  panel.append(font,
+  const materials = node('select');
+  fillMaterialMenu(materials,type.material || (type.gradient?'custom':'solid'));
+  materials.onchange = () => {
+    const preset = titleMaterials[materials.value];
+    change(()=>{
+      clip.type ||= {};
+      if (preset) Object.assign(clip.type,{material:materials.value,gradient:{stops:preset.stops,angle:preset.angle},depthColor:preset.side});
+      else Object.assign(clip.type,{material:null,gradient:materials.value==='solid'?null:type.gradient || {stops:customGradientStops,angle:180}});
+    });
+  };
+  const colors = [field('Face material',materials)];
+  if (!type.gradient) colors.push(c('fill','Text color'));
+  else {
+    colors.push(numberControl('Gradient angle (°)',type.gradient.angle,0,360,1,angle=>set('gradient',{...type.gradient,angle})));
+    if (!type.material) {
+      for (const [index,[at,color]] of type.gradient.stops.entries()) {
+        const input = node('input');
+        input.type = 'color';
+        input.value = color;
+        input.onchange = () => set('gradient',{...type.gradient,stops:type.gradient.stops.map((stop,i)=>i===index?[at,input.value]:stop)});
+        colors.push(field(`Color stop ${index+1}`,input));
+      }
+    }
+  }
+  panel.append(font,group('Color & materials',...colors),
     group('Background & outline',c('background','Background color'),n('boxOpacity','Background opacity (%)',0,100),
       n('padding','Background padding',0,60),c('outlineColor','Outline color'),n('outline','Outline width',0,18)),
     group('Soft shadow & depth',n('shadow','Shadow opacity (%)',0,100),n('blur','Shadow blur',0,48),
       n('shadowX','Shadow offset X',-60,60),n('shadowY','Shadow offset Y',-60,60),
-      n('depth','3D extrusion depth',0,14),c('depthColor','Extrusion color')));
+      n('depth','Extrusion depth (px)',0,maxExtrusionDepth),n('depthAngle','Extrusion angle (°)',0,360),c('depthColor','Extrusion color')));
   for(const details of panel.querySelectorAll('details')) if(openGroups.has(details.firstElementChild.textContent)) details.open=true;
 }
 
@@ -2920,21 +3003,27 @@ function styleTitle(label,title,offset,stage=$('stage')) {
   label.hidden = !label.textContent;
   const longest=Math.max(1,...wrapped.split('\n').map(row=>[...row].length));
   label.style.fontSize=`min(${type.size}cqh, ${86/(longest*(.56+type.tracking*.08))}cqw)`;
-  label.style.fontFamily=`"${type.family}", sans-serif`;
+  label.style.fontFamily=`${JSON.stringify(type.family)}, "Segoe UI", sans-serif`;
   label.style.fontWeight=type.weight%2?'700':'400';
   label.style.fontStyle=type.weight>=2?'italic':'normal';
   label.style.lineHeight=type.leading;
   label.style.textAlign=type.align;
-  label.style.color=type.fill;
+  label.classList.toggle('gradient-title',Boolean(type.gradient));
+  label.style.color=type.gradient?'transparent':type.fill;
   label.style.left=type.align==='left'?'7.5%':type.align==='right'?'92.5%':'50%';
   label.style.top=title.style==='caption'?'91%':title.style==='lower'?'87%':'50%';
   label.style.translate=`${type.align==='left'?'0':type.align==='right'?'-100%':'-50%'} ${title.style==='center'?'-50%':'-100%'}`;
   const units=value=>`${value*100/1080}cqh`;
   label.style.background=type.background+Math.round(type.boxOpacity*2.55).toString(16).padStart(2,'0');
   label.style.padding=type.boxOpacity?units(type.padding):'0';
+  if (type.gradient) {
+    label.dataset.titleFace = label.textContent;
+    const stops = type.gradient.stops.map(([at,color])=>`${color} ${at*100}%`).join(', ');
+    label.style.setProperty('--title-face-gradient',`linear-gradient(${type.gradient.angle}deg, ${stops})`);
+    label.style.setProperty('--title-padding',type.boxOpacity?units(type.padding):'0px');
+  }
   label.style.webkitTextStroke=`${units(type.outline)} ${type.outlineColor}`;
-  const shadow=[];
-  for(let i=1;i<=type.depth;i++) shadow.push(`${units(i)} ${units(i)} 0 ${type.depthColor}`);
+  const shadow=extrusionOffsets(type).reverse().map(([x,y])=>`${units(x)} ${units(y)} 0 ${type.depthColor}`);
   if(type.shadow) shadow.push(`${units(type.shadowX)} ${units(type.shadowY)} ${units(type.blur)} rgb(0 0 0 / ${type.shadow}%)`);
   label.style.textShadow=shadow.join(',') || 'none';
 }
@@ -3925,6 +4014,18 @@ $('export-form').onsubmit = async event => {
 };
 
 $('import').disabled = true;
+void api('/api/fonts').then(names=>{
+  const known = new Set([...installedFonts].map(name=>name.toLowerCase()));
+  for (const name of names) {
+    if (known.has(name.toLowerCase())) continue;
+    installedFonts.add(name);
+    known.add(name.toLowerCase());
+  }
+  const list = $('text-list-font');
+  fillFontMenu(list,list.value,true);
+  const inspector = $('inspector').querySelector('[data-title-font]');
+  if (inspector) fillFontMenu(inspector,inspector.value);
+}).catch(()=>{ /* The standard fonts remain usable if Windows cannot be scanned. */ });
 try {
   for (const asset of await api('/api/media')) bin.set(asset.id, asset);
   for (const lut of await api('/api/luts')) lutLibrary.set(lut.id, lut);
