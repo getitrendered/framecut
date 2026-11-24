@@ -1,0 +1,57 @@
+name: Publish Windows release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: framecut-${{ github.ref }}
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check release version and status
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'The tag must match package.json.' }
+          $draft = gh release view $env:GITHUB_REF_NAME --json isDraft --jq .isDraft 2>$null
+          $published = $LASTEXITCODE -eq 0 -and $draft -eq 'false'
+          "published=$($published.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          exit 0
+      - name: Install Inno Setup
+        if: steps.release.outputs.published != 'true'
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows installer
+        if: steps.release.outputs.published != 'true'
+        shell: pwsh
+        run: ./release/build.ps1
+      - name: Publish release and installer
+        if: steps.release.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $notes = "release/notes/$($tag.Substring(1)).md"
+          $artifact = 'dist/Framecut-Setup-x64.exe'
+          gh release view $tag --json isDraft > $null 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $artifact --clobber
+            if ($LASTEXITCODE) { exit $LASTEXITCODE }
+            gh release edit $tag --draft=false --latest
+          } elseif (Test-Path -LiteralPath $notes) {
+            gh release create $tag $artifact --verify-tag --title "Framecut $($tag.Substring(1))" --notes-file $notes --latest
+          } else {
+            gh release create $tag $artifact --verify-tag --title "Framecut $($tag.Substring(1))" --generate-notes --latest
+          }
+          exit $LASTEXITCODE
