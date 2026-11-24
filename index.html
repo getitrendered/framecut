@@ -251,10 +251,12 @@
           </section>
         </div>
         <details class="text-list-appearance" open>
-          <summary>Color, gradients &amp; 3D extrusion</summary>
+          <summary>Text color, outline &amp; 3D extrusion</summary>
           <div class="text-list-appearance-fields">
             <label class="property"><span>Face material</span><select id="text-list-material" aria-label="Face material"></select></label>
-            <label id="text-list-solid-field" class="property" hidden><span>Face color</span><input id="text-list-fill" type="color" value="#ffffff"></label>
+            <label class="property" title="Pick a solid color for the front of the letters"><span>Text color</span><input id="text-list-fill" type="color" value="#ffffff"></label>
+            <label class="property"><span>Outline color</span><input id="text-list-outline-color" type="color" value="#000000"></label>
+            <label class="property" title="Set the width to 0 to turn off the outline"><span>Outline width (px)</span><input id="text-list-outline" type="number" min="0" max="18" placeholder="2"></label>
             <label id="text-list-gradient-field" class="property" hidden><span>Gradient angle (°)</span><input id="text-list-gradient-angle" type="number" min="0" max="360" step="any" placeholder="Preset angle"></label>
             <label class="property"><span>Extrusion depth (px)</span><input id="text-list-depth" type="number" min="0" max="60" placeholder="0"></label>
             <label class="property"><span>Extrusion angle (°)</span><input id="text-list-depth-angle" type="number" min="0" max="360" step="any" placeholder="45"></label>

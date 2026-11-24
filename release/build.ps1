@@ -21,13 +21,17 @@ function Get-VerifiedFile([string] $Url, [string] $Path, [string] $Sha256) {
 $electron = Join-Path $build 'electron-v45.4.1-win32-x64.zip'
 $engine = Join-Path $build 'whisper-v1.8.6-win32-x64.zip'
 $model = Join-Path $build 'ggml-base-q5_1.bin'
+$resourceEditor = Join-Path $build 'rcedit-v2.0.0-x64.exe'
 Get-VerifiedFile 'https://github.com/electron/electron/releases/download/v45.4.1/electron-v45.4.1-win32-x64.zip' $electron '2BA6223AFA9121F42831FEFE92C434334907540165294FC56697449D12E7CFE9'
 Get-VerifiedFile 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.6/whisper-bin-x64.zip' $engine 'B07EA0B1B4115A38E1A7B07DEBF581F0B77D999925F8ACB8F39D322B0BA0A822'
 Get-VerifiedFile 'https://huggingface.co/ggerganov/whisper.cpp/resolve/f281eb4/ggml-base-q5_1.bin' $model '422F1AE452ADE6F30A004D7E5C6A43195E4433BC370BF23FAC9CC591F01A8898'
+Get-VerifiedFile 'https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe' $resourceEditor '3E7801DB1A5EDBEC91B49A24A094AAD776CB4515488EA5A4CA2289C400EADE2A'
 
 $stage = Join-Path $build ('package-' + [Guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath $electron -DestinationPath $stage
 Rename-Item -LiteralPath (Join-Path $stage 'electron.exe') -NewName 'Framecut.exe'
+& $resourceEditor (Join-Path $stage 'Framecut.exe') --set-icon (Join-Path $root 'framecut.ico') --set-version-string ProductName Framecut --set-version-string FileDescription Framecut --set-version-string OriginalFilename Framecut.exe
+if ($LASTEXITCODE) { throw 'The Framecut executable could not be branded.' }
 $whisperExtract = Join-Path $build 'whisper'
 Expand-Archive -LiteralPath $engine -DestinationPath $whisperExtract -Force
 $app = Join-Path $stage 'resources\app'

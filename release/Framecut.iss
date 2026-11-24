@@ -18,7 +18,7 @@ DefaultGroupName=Framecut
 OutputDir={#ReleaseRoot}
 OutputBaseFilename=Framecut-Setup-x64
 SetupIconFile=..\framecut.ico
-UninstallDisplayIcon={app}\resources\app\framecut.ico
+UninstallDisplayIcon={app}\Framecut.exe
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -36,8 +36,8 @@ Source: "{#StageRoot}\resources\app\*"; DestDir: "{app}\resources\app"; Flags: i
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked; Check: StandardInstall
 
 [Icons]
-Name: "{group}\Framecut"; Filename: "{app}\Framecut.exe"; IconFilename: "{app}\resources\app\framecut.ico"; Check: StandardInstall
-Name: "{userdesktop}\Framecut"; Filename: "{app}\Framecut.exe"; IconFilename: "{app}\resources\app\framecut.ico"; Tasks: desktopicon; Check: StandardInstall
+Name: "{group}\Framecut"; Filename: "{app}\Framecut.exe"; AppUserModelID: "com.framecut.editor"; Check: StandardInstall
+Name: "{userdesktop}\Framecut"; Filename: "{app}\Framecut.exe"; AppUserModelID: "com.framecut.editor"; Tasks: desktopicon; Check: StandardInstall
 
 [Run]
 Filename: "{app}\Framecut.exe"; Description: "Open Framecut"; Flags: nowait postinstall skipifsilent

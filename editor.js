@@ -958,15 +958,30 @@ function addTitle(preset, caption=false) {
   $('title-text')?.select();
 }
 
+let fontOptions;
+const inspectorFont = node('select');
+inspectorFont.dataset.titleFont = '';
+
 function fillFontMenu(menu,value,inherit=false) {
-  menu.replaceChildren();
-  if (inherit) menu.add(new Option('From title style',''));
-  for (const family of [...installedFonts].sort((a,b)=>a.localeCompare(b))) {
-    const option = new Option(family,family);
-    option.style.fontFamily = JSON.stringify(family);
+  if (!fontOptions) {
+    fontOptions = document.createDocumentFragment();
+    for (const family of [...installedFonts].sort((a,b)=>a.localeCompare(b))) {
+      fontOptions.append(new Option(family,family));
+    }
+  }
+  if (menu.fontOptions !== fontOptions) {
+    menu.replaceChildren();
+    if (inherit) menu.add(new Option('From title style',''));
+    menu.append(fontOptions.cloneNode(true));
+    menu.fontOptions = fontOptions;
+  }
+  const unavailable = menu.lastElementChild;
+  if (unavailable?.hasAttribute('data-unavailable-font')) unavailable.remove();
+  if (value && !installedFonts.has(value)) {
+    const option = new Option(value+' (unavailable)',value);
+    option.dataset.unavailableFont = '';
     menu.add(option);
   }
-  if (value && !installedFonts.has(value)) menu.add(new Option(value+' (unavailable)',value));
   menu.value = value;
 }
 
@@ -997,6 +1012,8 @@ function setupTextList() {
   const font = $('text-list-font');
   const material = $('text-list-material');
   const fill = $('text-list-fill');
+  const outline = $('text-list-outline');
+  const outlineColor = $('text-list-outline-color');
   const gradientAngle = $('text-list-gradient-angle');
   const gradientColors = ['start','middle','end'].map(name=>$('text-list-gradient-'+name));
   const depth = $('text-list-depth');
@@ -1023,7 +1040,11 @@ function setupTextList() {
   let lineCount = 0;
   let animation = 0;
   let previewItems = [];
+  let customFill = false;
+  let customOutlineColor = false;
   let customDepthColor = false;
+  fill.oninput = () => { customFill = true; material.value = 'solid'; };
+  outlineColor.oninput = () => { customOutlineColor = true; };
   depthColor.oninput = () => { customDepthColor = true; };
 
   function plan() {
@@ -1052,6 +1073,8 @@ function setupTextList() {
     if (Number.isFinite(depth.valueAsNumber)) type.depth = depth.valueAsNumber;
     if (Number.isFinite(depthAngle.valueAsNumber)) type.depthAngle = depthAngle.valueAsNumber;
     if (customDepthColor) type.depthColor = depthColor.value;
+    if (Number.isFinite(outline.valueAsNumber)) type.outline = outline.valueAsNumber;
+    if (customOutlineColor) type.outlineColor = outlineColor.value;
     const template = {
       style:matchStyle ? styleSource.style : style.value,
       ...(Object.keys(type).length ? {type} : {}),
@@ -1092,8 +1115,9 @@ function setupTextList() {
     exitTime.disabled = exit.value==='cut';
     const sequence = plan();
     const type = titleType(sequence.template);
-    font.style.fontFamily = JSON.stringify(type.family);
-    $('text-list-solid-field').hidden = material.value!=='solid';
+    if (!customFill) fill.value = type.fill;
+    if (!customOutlineColor) outlineColor.value = type.outlineColor;
+    outline.placeholder = String(type.outline);
     $('text-list-gradient-field').hidden = material.value==='solid' || material.value==='inherit';
     $('text-list-gradient-colors').hidden = material.value!=='custom';
     gradientAngle.placeholder = String(titleMaterials[material.value]?.angle ?? 180);
@@ -1705,10 +1729,13 @@ function renderTypography(panel, clip,openGroups) {
   const set=(key,value)=>change(()=>{ (clip.type ||= {})[key]=value; });
   const n=(key,label,min,max,step=1)=>numberControl(label,type[key],min,max,step,value=>set(key,value));
   const c=(key,label)=>colorControl(label,type[key],value=>set(key,value));
-  const menu = node('select');
-  menu.dataset.titleFont = '';
+  const menu = inspectorFont;
   fillFontMenu(menu,type.family);
-  menu.onchange = () => set('family',menu.value);
+  menu.onchange = () => {
+    const focused = document.activeElement===menu;
+    set('family',menu.value);
+    if (focused && menu.isConnected) menu.focus({preventScroll:true});
+  };
   const font=group('Typography',
     field('Font',menu),
     choice('Weight & style',[[0,'Regular'],[1,'Bold'],[2,'Italic'],[3,'Bold italic']],type.weight,v=>set('weight',Number(v))),
@@ -4166,11 +4193,14 @@ $('export-form').onsubmit = async event => {
 $('import').disabled = true;
 void api('/api/fonts').then(names=>{
   const known = new Set([...installedFonts].map(name=>name.toLowerCase()));
+  const previousCount = installedFonts.size;
   for (const name of names) {
     if (known.has(name.toLowerCase())) continue;
     installedFonts.add(name);
     known.add(name.toLowerCase());
   }
+  if (installedFonts.size === previousCount) return;
+  fontOptions = undefined;
   const list = $('text-list-font');
   fillFontMenu(list,list.value,true);
   const inspector = $('inspector').querySelector('[data-title-font]');

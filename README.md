@@ -12,6 +12,6 @@ Open **Updates** to check for a new version manually. Framecut also checks short
 2. Add `release/notes/<version>.md` for the in-app release notes, or use the generated GitHub release notes.
 3. Commit and push, then push a matching tag such as `v0.5.1`.
 
-The Windows release workflow validates the tag and publishes the Windows installer and a smaller app update for compatible runtimes. Keep the installer name `Framecut-Setup-x64.exe` stable. Update `runtimeId` when changing the pinned Electron or Whisper revisions, so the editor uses the full installer across runtime changes.
+The Windows release workflow validates the tag and publishes the Windows installer and a smaller app update for compatible runtimes. Keep the installer name `Framecut-Setup-x64.exe` stable. Update `runtimeId` when changing the pinned Electron or Whisper revisions or the icon embedded in `Framecut.exe`, so existing installations receive the full installer.
 
 To build locally on Windows with Inno Setup 6 installed, run `pwsh -File release/build.ps1`. The script verifies the pinned Electron and Whisper downloads and places the installer in `dist`. Footage, project profiles, and ProPainter files are kept outside the repository and the release.
