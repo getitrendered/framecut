@@ -13,6 +13,7 @@ import { graphics, graphicSize, particlePresets, particleSettings, readMesh, tra
 import { fontFamilies, titleType, typographyText, wrapText } from './text.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
+import { clipMix, trackOf, trackSettings } from './tracks.mjs';
 import { activityList, taskStage, withTask } from './activity.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
@@ -451,7 +452,7 @@ function sourceClip(clip) {
 
 function readAudio(project) {
   return (project.sounds || []).map(clip => {
-    const source = sourceClip(clip);
+    const source = sourceClip({...clip,kind:'audio'});
     if (!frame(clip.start) || !frame(clip.track) || clip.track < 1 || clip.track > 12 || source.asset.audio === null) throw new Error('An audio clip has an invalid source or position.');
     return source;
   });
@@ -469,10 +470,11 @@ function audioFilter(args,filter,timeline,dialogueOnly=false,reuse=false) {
   const labels=['soundbase'];
   let offset=args.filter(arg=>arg==='-i').length;
   for(const clip of sources) {
-    if (clip.muted || clip.asset.audio === null) continue;
+    const mix=clipMix(timeline,clip);
+    if (mix.muted || clip.asset.audio === null) continue;
     const input=clip.input ?? offset++;
     const label='snd'+input;
-    const gain=Number.isFinite(clip.gainDb) ? Math.max(-60,Math.min(0,clip.gainDb)) : 0;
+    const gain=mix.gain;
     const fadeIn=frame(clip.fadeIn) ? Math.min(clip.len,clip.fadeIn)*1600 : 0;
     const fadeOut=frame(clip.fadeOut) ? Math.min(clip.len,clip.fadeOut)*1600 : 0;
     const end=clip.len*1600;
@@ -579,15 +581,15 @@ async function loopSource(clip) {
   const folder=join(assetRoot,asset.id);
   const stride=Math.max(4,Math.ceil(clip.len/170));
   taskStage('Comparing edge frames');
-  const raw=await run(ffmpeg,['-nostdin','-v','error','-ss',(clip.in/fps).toFixed(6),'-i','source','-map',`0:${asset.video}`,'-t',(clip.len/fps).toFixed(6),
-    '-vf',`fps=${fps}/${stride},scale=20:12`,'-pix_fmt','rgb24','-f','rawvideo','pipe:1'],{cwd:folder,binary:true});
+  const raw=await runTimed(['-nostdin','-v','error','-ss',(clip.in/fps).toFixed(6),'-i','source','-map',`0:${asset.video}`,'-t',(clip.len/fps).toFixed(6),
+    '-vf',`fps=${fps}/${stride},scale=20:12`,'-pix_fmt','rgb24','-f','rawvideo','pipe:1'],{cwd:folder,binary:true},'Comparing edge frames',clip.len/fps);
   const match=findLoop(raw,20*12*3,stride);
   const label=`${asset.name.replace(/\.[^.]+$/,'')} (Closest loop).mp4`;
   const loop=await ingest(randomUUID(),label,async target=>{
-    await run(ffmpeg,['-nostdin','-v','error','-ss',((clip.in+match.start)/fps).toFixed(6),'-i','source',
+    await runTimed(['-nostdin','-v','error','-ss',((clip.in+match.start)/fps).toFixed(6),'-i','source',
       '-map',`0:${asset.video}`,...(asset.audio===null?[]:['-map',`0:${asset.audio}`]),
       '-t',((match.end-match.start)/fps).toFixed(6),'-vf','fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2',
-      '-c:v','libx264','-preset','veryfast','-crf','17','-pix_fmt','yuv420p','-c:a','aac','-f','mp4',target],{cwd:folder});
+      '-c:v','libx264','-preset','veryfast','-crf','17','-pix_fmt','yuv420p','-c:a','aac','-f','mp4',target],{cwd:folder},'Rendering loop cut',(match.end-match.start)/fps);
   });
   loop.loop=true;
   loopCopies.add(loop.id);
@@ -635,14 +637,16 @@ function readTimeline(project) {
   const videoFrames = Math.max(0,...clips.map(clip=>clip.start+clip.len));
   const total = Math.max(videoFrames, ...[...titles,...overlays,...sounds].map(clip => clip.start + clip.len));
   if (!total) throw new Error('Add media to the timeline first.');
-  return { clips, overlays, titles, sounds, videoFrames, total };
+  return { clips, overlays, titles, sounds, videoFrames, total,
+    trackSettings:project.trackSettings,masterMuted:project.masterMuted,masterGainDb:project.masterGainDb };
 }
 
 async function render(job, project, timeline) {
   const folder = join(data, 'renders', job.id);
   try {
     await mkdir(folder);
-    const { clips, overlays, titles, videoFrames, total } = timeline;
+    const { clips, overlays, videoFrames, total } = timeline;
+    const titles=timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
     const [width, height] = canvasSize(project.resolution,project.aspect);
     const filter = [];
     const args = ['-nostdin', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-filter_complex_threads', '2'];
@@ -864,6 +868,7 @@ const routes = {
   '/sound.mjs': ['sound.mjs','text/javascript; charset=utf-8'],
   '/layout.mjs': ['layout.mjs','text/javascript; charset=utf-8'],
   '/updates-ui.mjs': ['updates-ui.mjs','text/javascript; charset=utf-8'],
+  '/tracks.mjs': ['tracks.mjs','text/javascript; charset=utf-8'],
   '/graphics.mjs': ['graphics.mjs','text/javascript; charset=utf-8']
 };
 

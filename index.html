@@ -93,6 +93,7 @@
       <div class="timeline-bar">
         <h2 id="timeline-heading">Timeline</h2>
         <div class="edit-buttons">
+          <button id="timeline-lock" class="secondary" type="button" aria-pressed="false">Lock timeline</button>
           <button id="undo" class="icon" title="Undo (Ctrl+Z)" aria-label="Undo" disabled>↶</button>
           <button id="redo" class="icon" title="Redo (Ctrl+Y)" aria-label="Redo" disabled>↷</button>
           <span class="divider"></span>
@@ -105,7 +106,7 @@
         <div class="zoom"><label for="zoom" title="Scroll to pan. Shift+scroll to zoom.">Zoom</label><input id="zoom" type="range" min="1" max="220" value="70"><button id="fit" class="icon" title="Fit timeline to view">Fit</button></div>
       </div>
       <div class="timeline-grid">
-        <div id="track-labels" class="tracks" aria-hidden="true"></div>
+        <div id="track-labels" class="tracks" aria-label="Track controls"></div>
         <div id="scroll" class="timeline-scroll">
           <div id="track-space" class="track-space">
             <div id="ruler" class="ruler" aria-label="Time ruler"></div>
