@@ -39,7 +39,7 @@ $speech = Join-Path $app 'whisper'
 New-Item -ItemType Directory -Force -Path $speech | Out-Null
 $appFiles = @('activity.mjs','desktop.mjs','editor.js','fonts.mjs','framecut.ico','graphics.mjs','index.html','keying.mjs','key-preview.mjs','layout.mjs','led.mjs','loop.mjs',
     'motion.mjs','package.json','preload.cjs','projects.css','projects.mjs','remove_object.py','sequences.mjs','server.mjs','sound.mjs','style.css','text.mjs',
-    'tracks.mjs','update-config.json','updater.mjs','updates-ui.mjs','workspace.css')
+    'tracks.mjs','update-config.json','updater.mjs','updates-ui.mjs','workspace.css','youtube.mjs')
 foreach($file in $appFiles) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $app }
 $framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
 & (Join-Path $framework 'csc.exe') /nologo /target:winexe /platform:anycpu "/out:$app\UpdateHelper.exe" "/reference:$framework\System.Web.Extensions.dll" '/reference:System.IO.Compression.dll' '/reference:System.IO.Compression.FileSystem.dll' (Join-Path $PSScriptRoot 'UpdateHelper.cs')

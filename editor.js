@@ -786,6 +786,136 @@ function reportImport(message) {
   status.hidden = false;
 }
 
+function setupYoutubeImport() {
+  const dialog = $('youtube-dialog');
+  const form = $('youtube-form');
+  const url = $('youtube-url');
+  const check = $('youtube-check');
+  const download = $('youtube-download');
+  const options = $('youtube-options');
+  const quality = $('youtube-quality');
+  const bar = $('youtube-progress');
+  const status = $('youtube-status');
+  const stop = $('youtube-stop');
+  const show = $('youtube-footage');
+  let inspected, job, busy, imported, shownProject;
+
+  function controls() {
+    url.disabled = check.disabled = quality.disabled = Boolean(busy);
+    options.hidden = !inspected;
+    download.hidden = !inspected;
+    download.disabled = Boolean(busy);
+    stop.hidden = !busy;
+    stop.disabled = !job?.taskId;
+    show.hidden = !imported || Boolean(busy);
+  }
+
+  async function run(kind,body) {
+    if (!entry || busy || !mediaLoaded) return;
+    const adding = kind==='download';
+    if (adding && importing) { status.textContent = 'Wait for the current media import to finish.'; return; }
+    const projectId = entry.id;
+    busy = kind;
+    imported = null;
+    if (adding) {
+      importing = videoImporting = true;
+      $('import').disabled = true;
+      reportImport('Starting YouTube download…');
+    } else inspected = null;
+    controls();
+    updateProgress(bar,{progress:null});
+    status.textContent = adding ? 'Starting download…' : 'Checking the link…';
+    try {
+      job = await jsonPost(`/api/youtube/${kind}`,body);
+      controls();
+      let state;
+      do {
+        state = await api(`/api/youtube/jobs/${job.id}`);
+        if (state.status==='working') {
+          if (state.task) {
+            status.textContent = taskDetail(state.task);
+            updateProgress(bar,state.task);
+          }
+          await new Promise(resolve=>setTimeout(resolve,300));
+        }
+      } while (state.status==='working');
+      if (state.status!=='ready') throw new Error(state.status==='cancelled'?'YouTube import stopped.':state.error || 'YouTube import failed.');
+      if (adding) {
+        const asset = state.result;
+        if (entry.id!==projectId) throw new Error('Open the project that started this download.');
+        if (folder==='removed') folder='all';
+        if (folder!=='all') project.assignments[asset.id]=folder;
+        sourceAsset = asset.id;
+        addProjectAsset(asset);
+        imported = asset.id;
+        renderBin();
+        if (page==='footage') renderSource();
+        else if (page==='led') led.open(entry.id);
+        else renderTimeline();
+        status.textContent = `Added ${asset.name} to Footage.`;
+        reportImport(status.textContent);
+        if (!dialog.open) {
+          const toast = $('global-import-status');
+          toast.textContent = status.textContent;
+          toast.hidden = false;
+          clearTimeout(importToast);
+          importToast = setTimeout(()=>{ toast.hidden=true; },4200);
+        }
+      } else {
+        inspected = {id:job.id,...state.result};
+        $('youtube-title').textContent = inspected.title;
+        quality.replaceChildren(...inspected.choices.map(({quality,width,height,fps,ext,size,hasAudio},index)=>{
+          const frameRate = fps ? ` · ${fps} fps` : '';
+          const amount = size ? ` · ~${Math.max(1,Math.round(size/1048576))} MB` : '';
+          const label = `${index===0?'Best · ':''}${width} × ${height}${frameRate} · ${ext.toUpperCase()}${amount}${hasAudio?'':' · No audio'}`;
+          return new Option(label,quality);
+        }));
+        status.textContent = '';
+        if (dialog.open) quality.focus();
+      }
+    } catch (error) {
+      status.textContent = error.message;
+      if (adding) reportImport(error.message);
+    } finally {
+      busy = job = null;
+      if (adding) {
+        importing = videoImporting = false;
+        $('import').disabled = false;
+        updateProgress($('import-progress'),null);
+      }
+      updateProgress(bar,null);
+      controls();
+    }
+  }
+
+  $('youtube-import').onclick = ()=>{
+    if (!entry || !mediaLoaded || dialog.open) return;
+    if (!busy && shownProject!==entry.id) {
+      inspected = imported = null;
+      url.value = status.textContent = '';
+      controls();
+    }
+    shownProject = entry.id;
+    pause();
+    dialog.showModal();
+    if (!busy && !inspected) url.focus();
+  };
+  $('youtube-close').onclick=()=>dialog.close();
+  url.oninput=()=>{ inspected = imported = null; status.textContent = ''; controls(); };
+  form.onsubmit=event=>{ event.preventDefault(); void run('inspect',{url:url.value}); };
+  download.onclick=()=>{ if (inspected) void run('download',{id:inspected.id,quality:quality.value}); };
+  stop.onclick=async()=>{
+    if (!job?.taskId) return;
+    stop.disabled = true;
+    try { await jsonPost(`/api/tasks/${job.taskId}/cancel`,{}); }
+    catch (error) { if (busy) status.textContent=error.message; }
+  };
+  show.onclick=()=>{ sourceAsset=imported; dialog.close(); switchPage('footage'); };
+  controls();
+}
+
+setupYoutubeImport();
+
 function renderFolders() {
   const list = $('folder-list');
   list.replaceChildren();
@@ -891,6 +1021,7 @@ function switchPage(next) {
   $('sequence-settings').hidden = next === 'led';
   $('export').hidden = next === 'projects' || next === 'led';
   $('import').hidden = next === 'projects';
+  $('youtube-import').hidden = next === 'projects';
   $('save-project').hidden = next === 'projects';
   if (next!=='footage') $('source-audio').pause();
   if (next === 'projects' || next === 'led' || next === 'footage') controls.drawer(false);
@@ -4869,6 +5000,7 @@ $('export-form').onsubmit = async event => {
 };
 
 $('import').disabled = true;
+$('youtube-import').disabled = true;
 void api('/api/fonts').then(names=>{
   const known = new Set([...installedFonts].map(name=>name.toLowerCase()));
   const previousCount = installedFonts.size;
@@ -4893,6 +5025,7 @@ try {
   transcriptionAvailable=tools.transcription;
   mediaLoaded = true;
   $('import').disabled = false;
+  $('youtube-import').disabled = false;
 } catch (error) {
   notify(`Could not load Media — ${error.message}`);
 }

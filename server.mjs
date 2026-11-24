@@ -16,8 +16,9 @@ import { installedFontNames, stageTitleFont } from './fonts.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
 import { clipMix, trackOf, trackSettings } from './tracks.mjs';
-import { activityList, cancelTask, taskSignal, taskStage, withTask } from './activity.mjs';
+import { activityList, cancelTask, taskDetails, taskId, taskSignal, taskStage, withTask } from './activity.mjs';
 import { backgroundKey, keyParameters } from './keying.mjs';
+import { createYoutubeImporter, youtubeVideo } from './youtube.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const data = resolve(process.env.FRAMECUT_DATA || join(root, 'data'));
@@ -32,6 +33,7 @@ const audioLimiter = 'alimiter=limit=0.96:level=0:latency=1';
 const assets = new Map();
 const exports = new Map();
 const workers = new Set();
+const youtubeJobs = new Map();
 const assetRoot = join(data, 'media');
 const lutRoot = join(data, 'luts');
 const aiHome = [process.env.FRAMECUT_AI_HOME, join(data,'..','AI'),
@@ -71,18 +73,38 @@ function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const signal = taskSignal();
     signal?.throwIfAborted();
-    const child = spawn(command, args, { windowsHide: true, cwd: options.cwd, env:options.env, signal });
+    const tree = options.stopTree && process.platform==='win32';
+    const child = spawn(command, args, { windowsHide: true, cwd: options.cwd, env:options.env, signal:tree?undefined:signal });
+    if (tree) {
+      const stop = () => {
+        if (!child.pid || child.exitCode!==null) return;
+        const killer = spawn(join(process.env.WINDIR || 'C:/Windows','System32','taskkill.exe'),
+          ['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});
+        killer.on('error',()=>child.kill());
+        killer.on('exit',code=>{ if (code) child.kill(); });
+      };
+      child.stopTree = stop;
+      signal?.addEventListener('abort',stop,{once:true});
+      child.once('close',()=>signal?.removeEventListener('abort',stop));
+    }
     workers.add(child);
     if (options.input) pipeline(Readable.from(options.input),child.stdin).catch(() => {});
     else child.stdin.end();
     let output = '';
+    let outputError;
     const chunks = [];
     let errors = '';
     if (!options.binary) child.stdout.setEncoding('utf8');
     child.stdout.on('data', chunk => {
       if (options.binary) chunks.push(chunk);
       else if (options.progress) options.progress(chunk);
-      else output += chunk;
+      else if (!outputError) {
+        if (options.maxOutput && output.length+chunk.length>options.maxOutput) {
+          outputError = new Error('The video returned too much information.');
+          if (child.stopTree) child.stopTree();
+          else child.kill();
+        } else output += chunk;
+      }
     });
     child.stderr.setEncoding('utf8').on('data', chunk => {
       if(options.stderrProgress) options.stderrProgress(chunk);
@@ -98,6 +120,7 @@ function run(command, args, options = {}) {
     child.on('close', code => {
       workers.delete(child);
       if (signal?.aborted) reject(signal.reason);
+      else if (outputError) reject(outputError);
       else if (code === 0) resolve(options.binary ? Buffer.concat(chunks) : output);
       else reject(new Error(errors.trim() || `${command} exited with code ${code}`));
     });
@@ -138,7 +161,10 @@ export function getRender(id) {
 }
 
 export function stop() {
-  for (const child of workers) child.kill();
+  for (const child of workers) {
+    if (child.stopTree) child.stopTree();
+    else child.kill();
+  }
   server.close();
   server.closeAllConnections();
 }
@@ -156,6 +182,34 @@ async function importVideo(req) {
   }
   name = name.split(/[\\/]/).pop().slice(0, 240) || 'Video';
   return importMedia(name,path=>copyMedia(req,path,Number(req.headers['x-file-size'] || req.headers['content-length'])));
+}
+
+const youtube = createYoutubeImporter({data,run,ffmpeg,async ingest(name,transfer) {
+  const id = randomUUID();
+  try { return await ingest(id,name,transfer,{registerEarly:true}); }
+  catch (error) {
+    if (taskSignal()?.aborted) await rm(join(assetRoot,id),{recursive:true,force:true}).catch(()=>{});
+    throw error;
+  }
+}});
+
+function startYoutubeJob(label,operation) {
+  if ([...youtubeJobs.values()].some(job=>job.status==='working')) throw new Error('A YouTube import is already running.');
+  for (const [id,job] of youtubeJobs) if (Date.now()-job.started>20*60*1000 || youtubeJobs.size>=20) youtubeJobs.delete(id);
+  const job = {id:randomUUID(),status:'working',started:Date.now()};
+  youtubeJobs.set(job.id,job);
+  void withTask(label,async()=>{
+    job.taskId = taskId();
+    try {
+      const result = await operation(job);
+      taskSignal().throwIfAborted();
+      Object.assign(job,{status:'ready',result});
+    } catch (error) {
+      Object.assign(job,{status:taskSignal().aborted?'cancelled':'error',error:error.message.split('\n')[0]});
+      throw error;
+    }
+  },{cancellable:true}).catch(()=>{});
+  return {id:job.id,taskId:job.taskId};
 }
 
 export async function importMediaPath(path) {
@@ -1183,6 +1237,13 @@ const server = createServer(async (req, res) => {
       }
       if (path === '/api/media') return json(res, 200, [...assets.values()]);
       if (path === '/api/tasks') return json(res,200,activityList());
+      const youtubeMatch = /^\/api\/youtube\/jobs\/([\da-f-]{36})$/.exec(path);
+      if (youtubeMatch) {
+        const job = youtubeJobs.get(youtubeMatch[1]);
+        if (!job) return json(res,404,{error:'This YouTube request has expired.'});
+        const {id,status,result,error} = job;
+        return json(res,200,{id,status,result,error,task:taskDetails(job.taskId)});
+      }
       if (path === '/api/luts') return json(res, 200, [...luts.values()]);
       if (path === '/api/tools') return json(res,200,{ objectRemoval:aiReady, transcription:Boolean(whisperHome) });
       if (path === '/api/fonts') return json(res,200,await installedFontNames());
@@ -1213,6 +1274,24 @@ const server = createServer(async (req, res) => {
     } else if (req.method === 'POST' && req.headers['x-framecut'] === '1') {
       const cancel = /^\/api\/tasks\/([a-f\d-]+)\/cancel$/.exec(path);
       if (cancel) return cancelTask(cancel[1]) ? json(res,200,{cancelled:true}) : json(res,409,{error:'This task has already finished or is stopping.'});
+      if (path === '/api/youtube/inspect') {
+        const video = youtubeVideo((await requestJson(req,4096)).url);
+        return json(res,202,startYoutubeJob('Check YouTube video',async job=>{
+          const info = await youtube.inspect(video);
+          job.info = info;
+          return {title:info.title,duration:info.duration,choices:info.choices.map(({quality,width,height,fps,ext,size,hasAudio})=>
+            ({quality,width,height,fps,ext,size,hasAudio}))};
+        }));
+      }
+      if (path === '/api/youtube/download') {
+        const {id,quality} = await requestJson(req,4096);
+        const inspected = youtubeJobs.get(id);
+        const choice = inspected?.info?.choices.find(item=>item.quality===quality);
+        if (inspected?.status!=='ready' || !choice || Date.now()-inspected.started>20*60*1000) {
+          return json(res,400,{error:'Check the YouTube link again and choose one of its available qualities.'});
+        }
+        return json(res,202,startYoutubeJob(`Import ${inspected.info.title}`,()=>youtube.download(inspected.info,choice)));
+      }
       if (path === '/api/media') return json(res, 201, await importVideo(req));
       if (path === '/api/audio') return json(res,201,await withTask('Importing audio',()=>importAudio(req)));
       if (path === '/api/sound') return json(res,201,await withTask('Creating sound',async()=>createSound(await requestJson(req))));

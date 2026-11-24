@@ -15,6 +15,7 @@
     <strong class="apps-heading">Apps</strong>
     <div class="top-actions">
       <button id="import" class="secondary" type="button" title="Import media, subtitles, LUTs or 3D models" hidden>＋ Import</button>
+      <button id="youtube-import" class="secondary" type="button" aria-label="Import from YouTube" hidden>YouTube</button>
       <button id="activity-toggle" class="secondary" aria-expanded="false" aria-controls="activity-drawer"><span id="activity-label">Tasks</span><progress id="activity-progress" max="100" hidden></progress></button>
       <button id="updates-open" class="secondary" hidden>Updates</button>
       <span id="save-state" class="save-state" role="status">Saved locally</span>
@@ -219,6 +220,24 @@
       <p id="composition-delete-effects" class="subtle">This also removes its linked clips and clears its video from any LED walls using it.</p>
       <output id="composition-delete-status" role="status"></output>
       <div class="dialog-actions"><button id="composition-delete-cancel" class="secondary" type="button" autofocus>Cancel</button><button class="secondary composition-delete" type="submit">Delete composition</button></div>
+    </form>
+  </dialog>
+  <dialog id="youtube-dialog" aria-labelledby="youtube-heading">
+    <form id="youtube-form">
+      <div class="dialog-head"><h2 id="youtube-heading">Import from YouTube</h2><button id="youtube-close" class="icon" type="button" aria-label="Close YouTube import">×</button></div>
+      <label class="property"><span>YouTube video link</span><input id="youtube-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" maxlength="2048" placeholder="https://youtu.be/…" required></label>
+      <button id="youtube-check" class="secondary" type="submit">Check available qualities</button>
+      <div id="youtube-options" hidden>
+        <strong id="youtube-title"></strong>
+        <label class="property"><span>Video quality</span><select id="youtube-quality"></select></label>
+      </div>
+      <progress id="youtube-progress" max="100" aria-label="YouTube import progress" hidden></progress>
+      <output id="youtube-status" class="subtle" role="status"></output>
+      <div class="dialog-actions">
+        <button id="youtube-stop" class="secondary" type="button" hidden>Stop</button>
+        <button id="youtube-footage" class="secondary" type="button" hidden>Show in Footage</button>
+        <button id="youtube-download" class="primary" type="button" hidden>Download to project</button>
+      </div>
     </form>
   </dialog>
   <dialog id="export-dialog">

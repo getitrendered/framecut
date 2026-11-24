@@ -126,6 +126,9 @@ footer { min-height:30px; display:flex; align-items:center; justify-content:spac
 dialog { color:var(--text); background:#1c2329; border:1px solid #485762; border-radius:13px; width:min(410px,calc(100% - 28px)); padding:20px; box-shadow:0 20px 80px #0009; }
 dialog::backdrop { background:#05080bbb; }
 dialog form { display:grid; gap:12px; }
+#youtube-options:not([hidden]) { min-width:0; display:grid; gap:8px; overflow-wrap:anywhere; }
+#youtube-status { overflow-wrap:anywhere; }
+#youtube-status:empty, #youtube-dialog .dialog-actions:not(:has(>button:not([hidden]))) { display:none; }
 .dialog-head, .dialog-actions { display:flex; justify-content:space-between; align-items:center; gap:8px; }
 .dialog-head h2 { font-size:19px; }
 .dialog-actions { justify-content:flex-end; }
@@ -134,7 +137,8 @@ dialog progress { width:100%; accent-color:var(--accent); }
 @media (max-width:930px) {
   .workspace { grid-template-columns:minmax(140px, .8fr) minmax(250px, 2.3fr) minmax(155px, .8fr); }
   .save-state, .shortcuts { display:none; }
-  .top { padding:0 11px; }
+  .top { padding:0 11px; grid-template-columns:auto minmax(0,1fr) auto; gap:8px; }
+  .top-actions { gap:7px; }
   .inspector-body, .bin { padding:9px; }
   .timeline-bar { gap:6px; }
 }

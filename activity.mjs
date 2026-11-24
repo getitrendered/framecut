@@ -47,6 +47,8 @@ export function hasActiveTasks() {
 }
 
 export const taskSignal = () => active.getStore()?.controller?.signal;
+export const taskId = () => active.getStore()?.task.id;
+export const taskDetails = id => tasks.get(id)?.task;
 
 export function cancelTask(id) {
   const item=tasks.get(id);
