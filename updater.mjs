@@ -1,10 +1,12 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
-import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { copyFile, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const github = 'https://api.github.com';
@@ -174,20 +176,25 @@ export function createUpdater({ repository, privateRepo, currentVersion, cache, 
 }
 
 export async function startWindowsUpdate({ installer, executable, profile, statusFile }) {
-  const script = await readFile(new URL('./update-runner.ps1',import.meta.url),'utf8');
-  const info = Buffer.from(JSON.stringify({ installer, executable, profile, statusFile, pid:process.pid })).toString('base64');
-  const encoded = Buffer.from(`$payload64 = '${info}'\n${script}`,'utf16le').toString('base64');
-  const log = await open(join(dirname(statusFile),'update-helper.log'),'w');
-  try {
-    const child = spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{
-      windowsHide:true, stdio:['ignore',log.fd,log.fd]
-    });
-    await new Promise((resolve,reject)=>{
-      child.once('spawn',resolve);
-      child.once('error',reject);
-    });
-    child.unref();
-  } finally {
-    await log.close();
+  const readyFile=join(dirname(statusFile),`update-ready-${process.pid}`);
+  await rm(readyFile,{force:true});
+  const info = Buffer.from(JSON.stringify({ installer, executable, profile, statusFile, readyFile, pid:process.pid })).toString('base64');
+  const worker=join(dirname(statusFile),`FramecutUpdate-${process.pid}.exe`);
+  await copyFile(fileURLToPath(new URL('./UpdateHelper.exe',import.meta.url)),worker);
+  const child=spawn(worker,[info],{windowsHide:true,detached:true,stdio:'ignore'});
+  await new Promise((resolve,reject)=>{
+    child.once('spawn',resolve);
+    child.once('error',reject);
+  });
+  const deadline=Date.now()+6000;
+  while(Date.now()<deadline && child.exitCode===null) {
+    if(await stat(readyFile).catch(()=>null)) {
+      child.unref();
+      return;
+    }
+    await delay(75);
   }
+  child.kill();
+  child.unref();
+  throw new Error('Windows could not start the updater. Framecut is still open.');
 }

@@ -35,8 +35,11 @@ $speech = Join-Path $app 'whisper'
 New-Item -ItemType Directory -Force -Path $speech | Out-Null
 $appFiles = @('activity.mjs','desktop.mjs','editor.js','framecut.ico','graphics.mjs','index.html','layout.mjs','loop.mjs',
     'motion.mjs','package.json','preload.cjs','remove_object.py','server.mjs','sound.mjs','style.css','text.mjs',
-    'update-config.json','update-runner.ps1','updater.mjs','updates-ui.mjs','workspace.css')
+    'update-config.json','updater.mjs','updates-ui.mjs','workspace.css')
 foreach($file in $appFiles) { Copy-Item -LiteralPath (Join-Path $root $file) -Destination $app }
+$framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319'
+& (Join-Path $framework 'csc.exe') /nologo /target:winexe /platform:anycpu "/out:$app\UpdateHelper.exe" "/reference:$framework\System.Web.Extensions.dll" (Join-Path $PSScriptRoot 'UpdateHelper.cs')
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 foreach($file in 'whisper-cli.exe','whisper.dll','ggml.dll','ggml-base.dll','ggml-cpu.dll') {
     Copy-Item -LiteralPath (Join-Path $whisperExtract "Release\$file") -Destination $speech
 }
@@ -48,6 +51,7 @@ if(!$Compiler) {
     if(!$Compiler) {
         $Compiler = @(
             (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
+            (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe'),
             (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe')
         ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     }
