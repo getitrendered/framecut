@@ -23,6 +23,24 @@ export const properties = {
   bottom: ['Mask bottom (%)', 0, 100, 0]
 };
 
+export const videoFitModes = {
+  contain: 'Fit inside',
+  stretch: 'Stretch to screen',
+  width: 'Fit by width',
+  height: 'Fit by height'
+};
+
+export const videoFit = clip => Object.hasOwn(videoFitModes,clip.fit) ? clip.fit : 'contain';
+export const videoStretch = value => Number.isFinite(value) ? Math.max(5,Math.min(300,value)) : 100;
+export const hasVideoFraming = clip => Object.hasOwn(videoFitModes,clip.fit) ||
+  videoStretch(clip.stretchWidth)!==100 || videoStretch(clip.stretchHeight)!==100;
+
+export function fittedVideoSize(mode, aspect, width, height) {
+  if (mode==='stretch') return [width,height];
+  if (mode==='width' || (mode==='contain' && aspect>=width/height)) return [width,width/aspect];
+  return [height*aspect,height];
+}
+
 export const presets = [
   ['Fade in', 'Titles & motion', { opacity: [[0, 0], [.25, 100]] }],
   ['Fade out', 'Titles & motion', { opacity: [[.75, 100], [1, 0]] }],

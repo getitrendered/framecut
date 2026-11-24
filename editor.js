@@ -1,4 +1,4 @@
-import { canvasSize, looks, points, presets, properties, resizeMotion, valueAt } from '/motion.mjs';
+import { canvasSize, fittedVideoSize, hasVideoFraming, looks, points, presets, properties, resizeMotion, valueAt, videoFit, videoFitModes, videoStretch } from '/motion.mjs';
 import { fontFamilies, readSrt, textListEntrances, textListExits, textListMotion, textPresets, titleType, typographyText, visibleText, wrapText, writeSrt } from '/text.mjs';
 import { soundPresets, soundSettings, soundWave } from '/sound.mjs';
 import { paintParticles, particlePresets, particleSettings } from '/graphics.mjs';
@@ -10,6 +10,8 @@ import { createLedWorkspace } from '/led.mjs';
 import '/layout.mjs';
 const $ = id => document.getElementById(id);
 const fps = 30;
+const mediaDragType = 'application/x-framecut-asset';
+const importedAudioDragType = 'application/x-framecut-audio-asset';
 const storageKey = 'framecut-project-v1';
 const defaults = { name: 'Untitled project', resolution: '1080', aspect: 'landscape', format: 'mp4', quality: 'high',
   clips: [], titles: [], overlays: [], layers: 0, titleLayers:1, folders: [], assignments: {}, gradeReference: null, sounds:[], audioLayers:0 };
@@ -261,9 +263,11 @@ function openProject(key) {
   $('source-info').textContent = 'Select footage to preview it.';
   $('source-actions').replaceChildren();
   $('media-search').value = '';
+  $('footage-tray-search').value = '';
   $('media-status').hidden = true;
   $('projects-status').textContent = '';
   entry = next;
+  refreshFootageTray();
   if (mediaLoaded) notify('Ready');
   activateSequence('main');
   return true;
@@ -491,6 +495,7 @@ function addProjectAsset(asset) {
   if (media.includes(asset.id)) return;
   media.push(asset.id);
   persist();
+  refreshFootageTray();
 }
 
 function addProjectLut(lut) {
@@ -512,8 +517,57 @@ function setAssetRemoved(key, remove) {
   if (folder==='removed' && !removed.size) folder = 'all';
   persist();
   renderBin();
+  refreshFootageTray();
   renderSource();
   reportImport(remove ? `Removed ${asset.name} from Footage` : `Restored ${asset.name} to Footage`);
+}
+
+function mediaThumbnail(asset, tag = 'div') {
+  const thumbnail = node(tag,'thumbnail');
+  if (asset.kind==='audio') thumbnail.append(node('span','audio-thumbnail','♫'));
+  else {
+    const image = node('img');
+    image.src = diskURL(asset.id,'thumb.jpg');
+    image.alt = '';
+    image.loading = 'lazy';
+    image.draggable = false;
+    thumbnail.append(image);
+  }
+  thumbnail.append(node('time','',timecode(asset.frames).slice(3,8)));
+  return thumbnail;
+}
+
+function enableMediaDrag(element,asset) {
+  element.draggable = true;
+  element.ondragstart = event => {
+    const type = asset.kind==='audio' ? importedAudioDragType : mediaDragType;
+    event.dataTransfer.setData(type,asset.id);
+    event.dataTransfer.effectAllowed = 'copy';
+  };
+  element.ondragend = () => { $('drop-marker').hidden = true; };
+}
+
+function refreshFootageTray() {
+  if ($('footage-tray-content').hidden) return;
+  const list = $('footage-tray-items');
+  const search = $('footage-tray-search').value.trim().toLowerCase();
+  const media = projectMedia().reverse().filter(asset=>asset.name.toLowerCase().includes(search));
+  list.replaceChildren();
+  for (const asset of media) {
+    const card = button('',()=>{
+      const [type,track] = (selectedTrack || '').split(':');
+      if (asset.kind==='audio') insertSound(asset,type==='audio'?Number(track):undefined);
+      else if (type==='video' && Number(track)) insertOverlay(asset.id,Number(track));
+      else insertVideo(asset.id,project.clips.length,cursor);
+    });
+    card.className = 'tray-asset';
+    card.title = asset.name;
+    card.setAttribute('aria-label',`Add ${asset.name} from Footage tray`);
+    card.append(mediaThumbnail(asset),node('span','asset-name',asset.name));
+    enableMediaDrag(card,asset);
+    list.append(card);
+  }
+  if (!media.length) list.append(node('p','subtle',search?'No matching footage.':'Import media to drag it onto the timeline.'));
 }
 
 function renderBin() {
@@ -539,7 +593,7 @@ function renderBin() {
     const removed = removedAsset(asset.id);
     const card = node('article', 'asset');
     card.classList.toggle('active-asset', asset.id === sourceAsset);
-    card.draggable = !removed && asset.kind !== 'audio';
+    if (!removed && asset.kind!=='audio') enableMediaDrag(card,asset);
     card.oncontextmenu = event => {
       event.preventDefault();
       const menu = $('timeline-menu');
@@ -551,22 +605,10 @@ function renderBin() {
       menu.replaceChildren(action);
       showTimelineMenu(event);
     };
-    card.addEventListener('dragstart', event => {
-      event.dataTransfer.setData('application/x-framecut-asset', asset.id);
-      event.dataTransfer.effectAllowed = 'copy';
-    });
-    card.addEventListener('dragend', () => { $('drop-marker').hidden = true; });
-    const thumbnail = node('button', 'thumbnail');
+    const thumbnail = mediaThumbnail(asset,'button');
     thumbnail.type = 'button';
     thumbnail.setAttribute('aria-label', `Preview ${asset.name}`);
     thumbnail.onclick = () => { sourceAsset = asset.id; renderSource(); renderBin(); };
-    const img = node('img');
-    img.src = diskURL(asset.id, 'thumb.jpg');
-    img.alt = '';
-    img.loading = 'lazy';
-    img.draggable = false;
-    thumbnail.append(asset.kind==='audio' ? node('span','audio-thumbnail','♫') : img,
-      node('time', '', timecode(asset.frames).slice(3, 8)));
     const bottom = node('div', 'asset-bottom');
     const name = node('span', 'asset-name', asset.name);
     name.title = asset.name;
@@ -678,7 +720,7 @@ function renderFolders() {
       entry.addEventListener('drop', event => {
         if (!hasAsset(event)) return;
         event.preventDefault();
-        moveAsset(event.dataTransfer.getData('application/x-framecut-asset'), key);
+        moveAsset(event.dataTransfer.getData(mediaDragType), key);
       });
     }
     list.append(entry);
@@ -793,6 +835,7 @@ function insertOverlay(assetId, track = project.layers || 1, start = cursor, gra
     project.overlays.push(clip);
     selected = clip.id;
   });
+  selectTrack(trackOf(clip));
   setPosition(clip.start);
   return clip;
 }
@@ -816,6 +859,7 @@ function insertVideo(assetId, index, dropStart, composition) {
     project.clips.splice(index, 0, clip);
     selected = clip.id;
   });
+  selectTrack(trackOf(clip));
   setPosition(clip.start);
   revealCursor();
   return clip;
@@ -844,6 +888,7 @@ function setupTextList() {
   const numbers = $('text-list-numbers');
   const track = $('text-list-track');
   const style = $('text-list-style');
+  const font = $('text-list-font');
   const enter = $('text-list-enter');
   const exit = $('text-list-exit');
   const enterTime = $('text-list-enter-time');
@@ -855,6 +900,11 @@ function setupTextList() {
   const sampleLayer = $('text-list-preview-layer');
   const stage = $('text-list-stage');
   const add = $('text-list-add');
+  for (const family of Object.keys(fontFamilies)) {
+    const option = new Option(family,family);
+    option.style.fontFamily = family;
+    font.add(option);
+  }
   for (const [select,options] of [[enter,textListEntrances],[exit,textListExits]]) {
     for (const [value,[label]] of Object.entries(options)) select.add(new Option(label,value));
     select.value = 'fade';
@@ -877,9 +927,11 @@ function setupTextList() {
     const lines = input.value.split('\n');
     const items = lines.map(line=>cleanText(line,901)).filter(Boolean);
     const matchStyle = style.value==='selected' && styleSource;
+    const type = matchStyle ? {...styleSource.type} : {};
+    if (Object.hasOwn(fontFamilies,font.value)) type.family = font.value;
     const template = {
       style:matchStyle ? styleSource.style : style.value,
-      ...(matchStyle && styleSource.type ? {type:styleSource.type} : {}),
+      ...(Object.keys(type).length ? {type} : {}),
       len,motion:validTime ? textListMotion(timing) : {}
     };
     const layer = Number(track.value);
@@ -916,6 +968,7 @@ function setupTextList() {
     enterTime.disabled = enter.value==='cut';
     exitTime.disabled = exit.value==='cut';
     const sequence = plan();
+    font.style.fontFamily = titleType(sequence.template).family;
     if (lineCount!==sequence.lineCount) {
       lineCount = sequence.lineCount;
       numbers.textContent = Array.from({length:Math.min(501,lineCount)},(_,i)=>i+1).join('\n');
@@ -1324,6 +1377,7 @@ function timeField(label, frames, low, high, update) {
 function renderInspector() {
   const panel = $('inspector');
   const openGroups=new Set([...panel.querySelectorAll('details[open] summary')].map(summary=>summary.textContent));
+  const transformOpen = panel.querySelector('.video-transform')?.open ?? true;
   panel.replaceChildren();
   const clip = selection();
   if (!clip) {
@@ -1339,6 +1393,7 @@ function renderInspector() {
       return;
     }
     panel.append(node('h2', 'inspector-name', asset.name));
+    panel.append(videoTransformControls(clip,transformOpen));
     const timing = node('div', 'property-line');
     const remaining = laneNeighbors(clip).next - clip.start;
     timing.append(timeField('Source in (s)', clip.in, Math.max(0, clip.in + clip.len - remaining), clip.in + clip.len - 1, value => {
@@ -1412,7 +1467,10 @@ function renderInspector() {
   if (clip.kind!=='audio' && (page === 'animation' || page === 'color')) {
     const keys = page === 'color' ? ['brightness', 'contrast', 'saturation'] : Object.keys(properties);
     panel.append(node('h2', '', page === 'color' ? 'Color controls' : 'Keyframes'));
-    for (const key of keys) if (!clip.asset || key!=='reveal') panel.append(keyControl(clip, key));
+    for (const key of keys) {
+      if (clip.asset && (key==='reveal' || (page==='animation' && videoTransformKeys.includes(key)))) continue;
+      panel.append(keyControl(clip,key));
+    }
   }
 }
 
@@ -1603,6 +1661,7 @@ function insertSound(asset, track, start=cursor) {
   const clip={id:id(),kind:'audio',asset:asset.id,track,in:0,start:freeStart(project.sounds.filter(item=>item.track===track),start,asset.frames),len:asset.frames,
     dialogue:false,gainDb:0,fadeIn:0,fadeOut:0};
   change(()=>{ project.sounds.push(clip); project.audioLayers=Math.max(track,project.audioLayers); selected=clip.id; });
+  selectTrack(trackOf(clip));
   setPosition(clip.start);
   revealCursor();
 }
@@ -1748,7 +1807,66 @@ function clipStart(clip) {
   return clip.start ?? timeline.find(item => item.id === clip.id)?.start ?? 0;
 }
 
-function keyControl(clip, key) {
+const videoTransformKeys = ['scale','rotation','x','y','opacity'];
+
+function hasTransformEdits(clip) {
+  return hasVideoFraming(clip) || videoTransformKeys.some(key=>clip.motion?.[key]?.length);
+}
+
+function writeMotionValue(clip, key, value, keyframe, framing = false) {
+  if (!Number.isFinite(value)) return;
+  const [,min,max] = properties[key];
+  const time = keyframe ? clamp(cursor-clipStart(clip),0,clip.len-1) : 0;
+  change(() => {
+    if (framing && key!=='opacity') clip.fit = videoFit(clip);
+    clip.motion ||= {};
+    const previous = (clip.motion[key] || []).filter(([frame])=>frame!==time);
+    clip.motion[key] = [...previous,[time,clamp(value,min,max)]].sort((a,b)=>a[0]-b[0]);
+  });
+}
+
+function videoTransformControls(clip, open) {
+  const details = node('details','property-group video-transform');
+  const controls = node('div','property-line');
+  details.open = open;
+  const fit = choice('Video fit',Object.entries(videoFitModes),videoFit(clip),value=>change(()=>{
+    clip.fit = value;
+  }));
+  fit.classList.add('transform-wide');
+  const motionField = key => {
+    if (page==='animation') {
+      const control = keyControl(clip,key,true);
+      control.classList.add('transform-wide');
+      return control;
+    }
+    const [label,min,max] = properties[key];
+    const local = clamp(cursor-clipStart(clip),0,clip.len-1);
+    const control = numberControl(label,Math.round(valueAt(clip,key,local)*10)/10,min,max,'any',value=>{
+      writeMotionValue(clip,key,value,points(clip,key).length>1,true);
+    });
+    control.querySelector('input').dataset.transformKey = key;
+    return control;
+  };
+  const stretch = (key,label) => numberControl(label,videoStretch(clip[key]),5,300,'any',value=>change(()=>{
+    clip[key] = value;
+  }));
+  controls.append(fit,motionField('scale'),motionField('rotation'),
+    stretch('stretchWidth','Stretch width (%)'),stretch('stretchHeight','Stretch height (%)'),
+    ...videoTransformKeys.slice(2).map(motionField));
+  const reset = button('Reset transform',()=>change(()=>{
+    delete clip.fit;
+    delete clip.stretchWidth;
+    delete clip.stretchHeight;
+    for (const key of videoTransformKeys) if (clip.motion) delete clip.motion[key];
+  }),protectedTrack(project,trackOf(clip)) || !hasTransformEdits(clip));
+  reset.classList.add('transform-wide');
+  reset.dataset.transformReset = '';
+  controls.append(reset);
+  details.append(node('summary','', 'Transform'),controls);
+  return details;
+}
+
+function keyControl(clip, key, framing = false) {
   const [label, min, max] = properties[key];
   const at = clamp(cursor - clipStart(clip), 0, clip.len - 1);
   const checkbox = node('div', 'key-control');
@@ -1758,18 +1876,8 @@ function keyControl(clip, key) {
   input.value = Math.round(valueAt(clip, key, at) * 10) / 10;
   input.dataset.key = key;
   const has = frame => clip.motion?.[key]?.some(([time]) => time === frame);
-  function write(value, keyframe) {
-    if (!Number.isFinite(value)) return;
-    const local = clamp(cursor - clipStart(clip), 0, clip.len - 1);
-    const time = keyframe ? local : 0;
-    change(() => {
-      clip.motion ||= {};
-      const previous = (clip.motion[key] || []).filter(([frame]) => frame !== time);
-      clip.motion[key] = [...previous, [time, clamp(value, min, max)]].sort((a,b) => a[0] - b[0]);
-    });
-  }
-  input.onchange = () => write(input.valueAsNumber, page === 'animation' || points(clip, key).length > 1);
-  const add = button('◆', () => write(input.valueAsNumber, true));
+  input.onchange = () => writeMotionValue(clip,key,input.valueAsNumber,page==='animation' || points(clip,key).length>1,framing);
+  const add = button('◆', () => writeMotionValue(clip,key,input.valueAsNumber,true,framing));
   add.className = 'icon';
   add.classList.toggle('keyed', Boolean(has(at)));
   add.title = 'Set ' + label + ' at playhead';
@@ -1789,8 +1897,12 @@ function keyControl(clip, key) {
 
 function updateKeyControls() {
   const clip = selection();
-  if (!clip || clip.kind==='audio' || (page !== 'animation' && page !== 'color')) return;
+  if (!clip || clip.kind==='audio') return;
   const frame = clamp(cursor - clipStart(clip), 0, clip.len - 1);
+  for (const input of $('inspector').querySelectorAll('[data-transform-key]')) {
+    if (document.activeElement!==input) input.value = Math.round(valueAt(clip,input.dataset.transformKey,frame)*10)/10;
+  }
+  if (page!=='animation' && page!=='color') return;
   for (const input of $('inspector').querySelectorAll('[data-key]')) {
     const key = input.dataset.key;
     if (document.activeElement !== input) input.value = Math.round(valueAt(clip, key, frame) * 10) / 10;
@@ -2125,23 +2237,36 @@ async function addGraphic(kind, file, settings) {
   finally { importing = false; }
 }
 
-function fittedArea(clip) {
-  const ratio = active.videoWidth && active.videoHeight ? active.videoWidth / active.videoHeight :
-    (bin.get(clip.asset)?.width || 1920)/(bin.get(clip.asset)?.height || 1080);
-  const screen = $('stage').clientWidth / $('stage').clientHeight;
-  const w = Math.min(1,ratio/screen), h = Math.min(1,screen/ratio);
-  return { x:(1-w)/2,y:(1-h)/2,w,h };
+function fittedMediaSize(clip, el) {
+  const asset = bin.get(clip.asset);
+  const ratio = el.readyState && el.videoWidth && el.videoHeight ? el.videoWidth/el.videoHeight :
+    (asset?.width || 1920)/(asset?.height || 1080);
+  const [width,height] = sequenceSize(project);
+  const [w,h] = fittedVideoSize(videoFit(clip),ratio,width,height);
+  return { w:w/width*videoStretch(clip.stretchWidth)/100,
+    h:h/height*videoStretch(clip.stretchHeight)/100, aspect:width/height };
+}
+
+function trackingPoint(area, x, y, inverse = false) {
+  const angle = area.angle*Math.PI/180*(inverse?-1:1);
+  const dx = inverse ? x-area.cx : (x-.5)*area.w;
+  const dy = inverse ? y-area.cy : (y-.5)*area.h;
+  const u = dx*Math.cos(angle)-dy*Math.sin(angle)/area.aspect;
+  const v = dx*Math.sin(angle)*area.aspect+dy*Math.cos(angle);
+  return inverse ? [u/area.w+.5,v/area.h+.5] : [u+area.cx,v+area.cy];
 }
 
 function showTrackingBox(box) {
   const overlay = $('tracking-box');
   overlay.hidden = !box;
   if (!box) return;
-  const area = trackingArea || { x:0,y:0,w:1,h:1 };
-  overlay.style.left = `${(area.x+box.x*area.w)*100}%`;
-  overlay.style.top = `${(area.y+box.y*area.h)*100}%`;
+  const area = trackingArea;
+  const [x,y] = trackingPoint(area,box.x+box.w/2,box.y+box.h/2);
+  overlay.style.left = `${(x-box.w*area.w/2)*100}%`;
+  overlay.style.top = `${(y-box.h*area.h/2)*100}%`;
   overlay.style.width = `${box.w*area.w*100}%`;
   overlay.style.height = `${box.h*area.h*100}%`;
+  overlay.style.transform = `rotate(${area.angle}deg)`;
 }
 
 function cancelPicking() {
@@ -2173,11 +2298,13 @@ $('stage').onpointerdown = event => {
   if (!picking || !clip || clip.id !== trackingSource) return;
   const stage = $('stage');
   const rect = stage.getBoundingClientRect();
-  trackingArea = fittedArea(clip);
-  const at = event => [
-    clamp(((event.clientX-rect.left)/rect.width-trackingArea.x)/trackingArea.w,0,1),
-    clamp(((event.clientY-rect.top)/rect.height-trackingArea.y)/trackingArea.h,0,1)
-  ];
+  const offset = clamp(cursor-clipStart(clip),0,clip.len-1);
+  const { w,h,aspect } = fittedMediaSize(clip,active);
+  const scale = valueAt(clip,'scale',offset)/100;
+  trackingArea = { w:w*scale,h:h*scale,aspect,angle:valueAt(clip,'rotation',offset),
+    cx:.5+valueAt(clip,'x',offset)/100,cy:.5+valueAt(clip,'y',offset)/100 };
+  const at = event => trackingPoint(trackingArea,(event.clientX-rect.left)/rect.width,
+    (event.clientY-rect.top)/rect.height,true).map(value=>clamp(value,0,1));
   const [x,y] = at(event);
   stage.setPointerCapture(event.pointerId);
   const update = move => {
@@ -2250,15 +2377,15 @@ function attachMotion(id) {
   if (!item || !source) return notify('Select a tracked shot and a layer.');
   const duration = Math.min(item.len,source.len);
   const samples = tracked.points.filter(([at]) => at < duration);
-  const {x,y,w,h} = tracked.area;
   const start = clipStart(source);
   if (!samples.length || layerItems(item).some(peer => peer.id !== id && peer.start < start+duration && peer.start+peer.len > start)) return notify('Choose a free layer to place the tracking result.');
   change(() => {
     item.start = start;
     item.len = duration;
     item.motion ||= {};
-    item.motion.x = samples.map(([at,px])=>[at,(x+px*w-.5)*100]);
-    item.motion.y = samples.map(([at,,py])=>[at,(y+py*h-.5)*100]);
+    const positions = samples.map(([at,x,y])=>[at,...trackingPoint(tracked.area,x,y)]);
+    item.motion.x = positions.map(([at,x])=>[at,(x-.5)*100]);
+    item.motion.y = positions.map(([at,,y])=>[at,(y-.5)*100]);
     selected = id;
   });
   notify('Tracking added to X and Y keyframes');
@@ -2460,16 +2587,19 @@ function refreshTrackControls() {
     lane.classList.toggle('muted-track',Boolean(settings.muted));
   }
   selectTrack(selectedTrack);
+  const clip = selection();
+  const isProtected = clip && protectedTrack(project,trackOf(clip));
   for(const control of $('inspector').querySelectorAll('input,select,textarea')){
-    const clip=selection();
-    if(clip && protectedTrack(project,trackOf(clip)) && !control.disabled){
+    if(isProtected && !control.disabled){
       control.disabled=true;
       control.dataset.trackProtected='yes';
-    } else if(control.dataset.trackProtected && !(clip && protectedTrack(project,trackOf(clip)))){
+    } else if(control.dataset.trackProtected && !isProtected){
       control.disabled=false;
       delete control.dataset.trackProtected;
     }
   }
+  const reset = $('inspector').querySelector('[data-transform-reset]');
+  if (reset && clip) reset.disabled = isProtected || !hasTransformEdits(clip);
 }
 
 function renderKeyLanes() {
@@ -2565,7 +2695,11 @@ function renderTimeline() {
     lane.dataset.layer = number;
     lane.dataset.type = 'video';
     lane.append(...project.overlays.filter(clip => clip.track === number).map(clip => makeClip(clip, true)));
-    lane.ondragover = event => { if (hasAsset(event) || hasComposition(event)) event.preventDefault(); };
+    lane.ondragover = event => {
+      if (!hasAsset(event) && !hasComposition(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    };
     lane.ondrop = event => {
       if (hasComposition(event)) {
         event.preventDefault();
@@ -2574,7 +2708,8 @@ function renderTimeline() {
       }
       if (!hasAsset(event)) return;
       event.preventDefault();
-      insertOverlay(event.dataTransfer.getData('application/x-framecut-asset'), number, frameAt(event.clientX));
+      const asset = projectAsset(event.dataTransfer.getData(mediaDragType));
+      if (asset && !removedAsset(asset.id)) insertOverlay(asset.id,number,assetDropFrame(event,asset));
     };
     $('overlay-tracks').append(lane);
   }
@@ -2582,7 +2717,7 @@ function renderTimeline() {
   $('video-track').dataset.type='video';
   $('video-track').dataset.layer=0;
   $('video-track').replaceChildren(...timeline.map(clip => makeClip(clip, true)));
-  if (!timeline.length) $('video-track').append(node('span', 'lane-hint', 'Drop videos here or add from Media'));
+  if (!timeline.length) $('video-track').append(node('span', 'lane-hint', 'Drag video here from the Footage tray'));
   $('audio-track-add').hidden=page!=='sound';
   $('audio-tracks').replaceChildren();
   for(let number=1;number<=Math.max(page==='sound'?3:0,project.audioLayers);number++) {
@@ -2592,9 +2727,13 @@ function renderTimeline() {
     lane.setAttribute('aria-label',`Audio ${number}`);
     lane.append(...project.sounds.filter(clip=>clip.track===number).map(clip=>makeClip(clip,false)));
     lane.ondragover=event=>{
-      if(Array.from(event.dataTransfer.types).includes('application/x-framecut-sound')) { event.preventDefault(); event.dataTransfer.dropEffect='copy'; }
+      if (hasImportedAudio(event) || Array.from(event.dataTransfer.types).includes('application/x-framecut-sound')) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'copy';
+      }
     };
     lane.ondrop=event=>{
+      if (hasImportedAudio(event)) return dropImportedAudio(event,number);
       const preset=event.dataTransfer.getData('application/x-framecut-sound');
       if(!Object.hasOwn(soundPresets,preset)) return;
       event.preventDefault();
@@ -2690,6 +2829,7 @@ for (const el of players) {
       mediaPosition(el, el.pendingSeek);
       delete el.pendingSeek;
     }
+    if (el===active && activeClip) styleVideoMotion(el,activeClip,cursor-activeClip.start);
   });
   el.addEventListener('error', () => {
     if (el === active && activeClip) {
@@ -2739,7 +2879,7 @@ function showVideo(item, frame, force) {
 function display(frame, seek = false) {
   const item = timeline.find(item => frame >= item.start && frame < item.start + item.len);
   showVideo(item, frame, seek);
-  if (item) { styleMotion(active, item, frame - item.start); setAudioLevel(active,item); }
+  if (item) { styleVideoMotion(active, item, frame - item.start); setAudioLevel(active,item); }
   displayOverlays(frame, seek);
   displaySounds(frame,seek);
   const titleNodes = [];
@@ -2841,6 +2981,17 @@ function styleMotion(el, clip, local) {
   el.style.clipPath = `inset(${value('top')}% ${value('right')}% ${value('bottom')}% ${value('left')}%)`;
 }
 
+function styleVideoMotion(el,clip,local) {
+  const framing = hasVideoFraming(clip);
+  if (el.classList.contains('framed-video')!==framing) el.classList.toggle('framed-video',framing);
+  if (framing) {
+    const {w,h} = fittedMediaSize(clip,el);
+    el.style.setProperty('--fit-width',`${w*100}cqw`);
+    el.style.setProperty('--fit-height',`${h*100}cqh`);
+  }
+  styleMotion(el,clip,local);
+}
+
 function displayOverlays(frame, seek) {
   const visible = project.overlays.filter(clip => bin.has(clip.asset) && frame >= clip.start && frame < clip.start + clip.len)
     .sort((a,b) => a.track - b.track);
@@ -2859,6 +3010,8 @@ function displayOverlays(frame, seek) {
       el.preload = 'auto';
       el.addEventListener('loadedmetadata', () => {
         if (el.pendingSeek !== undefined) { mediaPosition(el,el.pendingSeek); delete el.pendingSeek; }
+        const current = project.overlays.find(item=>item.id===clip.id);
+        if (current && overlayPlayers.get(clip.id)===el) styleVideoMotion(el,current,cursor-current.start);
       });
       $('preview-overlays').append(el);
       overlayPlayers.set(clip.id,el);
@@ -2868,7 +3021,7 @@ function displayOverlays(frame, seek) {
     if (fresh || seek) setSource(el, clip, frame);
     else if (Math.abs(el.currentTime - seconds(clip.in + frame - clip.start)) > .16) mediaPosition(el,seconds(clip.in + frame - clip.start));
     if (playing && el.paused) el.play().catch(() => {});
-    styleMotion(el, clip, frame - clip.start);
+    styleVideoMotion(el, clip, frame - clip.start);
   }
 }
 
@@ -3434,7 +3587,8 @@ document.addEventListener('keydown',event=>{
 });
 
 const hasFiles = event => Array.from(event.dataTransfer.types).includes('Files');
-const hasAsset = event => Array.from(event.dataTransfer.types).includes('application/x-framecut-asset');
+const hasAsset = event => Array.from(event.dataTransfer.types).includes(mediaDragType);
+const hasImportedAudio = event => Array.from(event.dataTransfer.types).includes(importedAudioDragType);
 const hasComposition = event => sequenceKey==='main' && Array.from(event.dataTransfer.types).includes(compositionType);
 const library = document.querySelector('.library');
 library.addEventListener('dragover', event => {
@@ -3469,8 +3623,27 @@ $('video-track').addEventListener('drop', event => {
   }
   if (!hasAsset(event)) return;
   event.preventDefault();
+  const asset = projectAsset(event.dataTransfer.getData(mediaDragType));
+  if (asset && !removedAsset(asset.id)) insertVideo(asset.id,project.clips.length,assetDropFrame(event,asset));
+});
+function assetDropFrame(event,asset) {
+  const frame = snapPoint(frameAt(event.clientX),asset.frames,null,event.shiftKey);
   $('drop-marker').hidden = true;
-  insertVideo(event.dataTransfer.getData('application/x-framecut-asset'), project.clips.length,snapPoint(frameAt(event.clientX),0,null,event.shiftKey));
+  return frame;
+}
+function dropImportedAudio(event,track) {
+  event.preventDefault();
+  const asset = projectAsset(event.dataTransfer.getData(importedAudioDragType));
+  if (asset?.kind!=='audio' || removedAsset(asset.id)) return;
+  insertSound(asset,track,assetDropFrame(event,asset));
+}
+scroll.addEventListener('dragover',event=>{
+  if (!hasImportedAudio(event) || event.defaultPrevented) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+scroll.addEventListener('drop',event=>{
+  if (hasImportedAudio(event) && !event.defaultPrevented) dropImportedAudio(event);
 });
 document.addEventListener('dragover', event => { if (hasFiles(event)) event.preventDefault(); });
 document.addEventListener('drop', event => { if (hasFiles(event)) event.preventDefault(); });
@@ -3597,6 +3770,13 @@ $('aspect').onchange = event => {
 };
 $('media-search').oninput = renderBin;
 $('media-sort').onchange = renderBin;
+$('footage-tray-search').oninput = refreshFootageTray;
+$('footage-tray-toggle').onclick = () => {
+  const tray = $('footage-tray-content');
+  tray.hidden = !tray.hidden;
+  $('footage-tray-toggle').setAttribute('aria-expanded',String(!tray.hidden));
+  refreshFootageTray();
+};
 $('source-folder').onchange = event => moveAsset(sourceAsset, event.target.value);
 $('new-folder').onclick = () => {
   $('folder-form').hidden = !$('folder-form').hidden;

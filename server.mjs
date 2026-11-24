@@ -8,7 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { expression, points, properties } from './motion.mjs';
+import { expression, hasVideoFraming, points, properties, videoFit, videoStretch } from './motion.mjs';
 import { exportRange, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
 import { fontFamilies, textCharacters, textFragment, titleType, typewriterStep, typographyText, usesTextReveal, wrapText } from './text.mjs';
@@ -813,7 +813,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
   for (const [i, clip] of clips.entries()) {
     if(clip.start>previous) gap(clip.start-previous);
     addRenderInput(args,clip,batch);
-    const effects = Object.keys(properties).some(key => key!=='reveal' && changed(clip,key));
+    const effects = hasVideoFraming(clip) || Object.keys(properties).some(key => key!=='reveal' && changed(clip,key));
     videoStream(filter, clip, i, width,height, effects, `vs${i}`);
     if (effects) {
       filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${clip.len}[black${i}]`);
@@ -935,7 +935,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
 
 function changed(clip,key) { return points(clip,key).some(([,value]) => value !== properties[key][3]); }
 
-function motionFilters(clip) {
+function motionFilters(clip, framing = false) {
   const result = [];
   const at = (key, frame = 'N') => expression(clip,key,clip.sectionOffset ? `(${frame}+${clip.sectionOffset})` : frame);
   if (changed(clip,'brightness') || changed(clip,'contrast') || changed(clip,'saturation')) {
@@ -948,7 +948,14 @@ function motionFilters(clip) {
     if (!masked && points(clip,'opacity').length === 1) result.push(`lut=a='val*(${at('opacity')})/100'`);
     else result.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${at('opacity')})/100${mask}'`);
   }
-  if (changed(clip,'rotation')) result.push(`rotate='(${at('rotation','n')})*PI/180':fillcolor=black@0`);
+  if (changed(clip,'rotation')) {
+    const angle = `(${at('rotation','n')})*PI/180`;
+    const staticAngle = points(clip,'rotation').length===1;
+    const bounds = !framing ? '' : staticAngle ?
+      `:ow='ceil(rotw(${angle})/2)*2':oh='ceil(roth(${angle})/2)*2'` :
+      ":ow='ceil(hypot(iw,ih)/2)*2':oh=ow";
+    result.push(`rotate='${angle}'${bounds}:fillcolor=black@0`);
+  }
   if (changed(clip,'scale')) {
     const scale = at('scale','n');
     result.push(`scale=w='max(2,trunc(iw*(${scale})/200)*2)':h='max(2,trunc(ih*(${scale})/200)*2)':eval=frame,setsar=1`);
@@ -956,16 +963,29 @@ function motionFilters(clip) {
   return result;
 }
 
+function fitVideoFilter(clip,width,height) {
+  const [w,h] = {
+    contain:[`min(${width},${height}*dar)`,`min(${height},${width}/dar)`],
+    stretch:[width,height],
+    width:[width,`${width}/dar`],
+    height:[`${height}*dar`,height]
+  }[videoFit(clip)];
+  const horizontal = videoStretch(clip.stretchWidth);
+  const vertical = videoStretch(clip.stretchHeight);
+  return `scale=w='max(2,round((${w})*${horizontal}/200)*2)':h='max(2,round((${h})*${vertical}/200)*2)':reset_sar=1,setsar=1`;
+}
+
 function videoStream(filter,clip,input,width,height,alpha,output) {
   const chain = ['setpts=PTS-STARTPTS',`fps=${fps}:round=up`];
+  const framing = hasVideoFraming(clip);
   const offset = clip.sectionOffset ?? 0;
   const trim = [`tpad=stop_mode=clone:stop_duration=${((clip.sourceLength ?? clip.len)/fps).toFixed(6)}`,
     `trim=start_frame=${offset}:end_frame=${offset+clip.len}`,'setpts=PTS-STARTPTS'];
   if (offset) chain.push(...trim);
   if (clip.lut && luts.has(clip.lut)) chain.push(`lut3d=file=../../luts/${clip.lut}.cube`);
-  chain.push(`format=${alpha ? 'yuva420p' : 'yuv420p'}`,encodeSize(width,height,alpha));
+  chain.push(`format=${alpha ? 'yuva420p' : 'yuv420p'}`,framing ? fitVideoFilter(clip,width,height) : encodeSize(width,height,alpha));
   if (!offset) chain.push(...trim);
-  if (alpha) chain.push(...motionFilters(clip));
+  if (alpha) chain.push(...motionFilters(clip,framing));
   filter.push(`[${input}:${clip.asset.video}]${chain.join(',')}[${output}]`);
 }
 
