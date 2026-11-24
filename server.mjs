@@ -8,7 +8,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
-import { canvasSize, expression, points, properties } from './motion.mjs';
+import { expression, points, properties } from './motion.mjs';
+import { exportRange, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
 import { fontFamilies, titleType, typographyText, wrapText } from './text.mjs';
 import { soundSettings, soundWave } from './sound.mjs';
@@ -41,6 +42,7 @@ const loopCopies=new Set();
 const luts = new Map();
 const previews = new Map();
 const importingFolders = new Set();
+const stillImage = /\.(png|jpe?g|webp|bmp|tiff?|avif|heic|heif|jxl|tga|ico|ppm|pgm|pbm|exr|dpx)$/i;
 await mkdir(assetRoot, { recursive: true });
 await mkdir(lutRoot, { recursive: true });
 await mkdir(join(data, 'renders'), { recursive: true });
@@ -144,11 +146,11 @@ async function importVideo(req) {
 }
 
 export async function importMediaPath(path) {
-  if(typeof path!=='string' || !isAbsolute(path)) throw new Error('Choose a video file from your computer.');
+  if(typeof path!=='string' || !isAbsolute(path)) throw new Error('Choose a media file from your computer.');
   const file=await stat(path);
-  if(!file.isFile()) throw new Error('Choose a video file from your computer.');
+  if(!file.isFile()) throw new Error('Choose a media file from your computer.');
   const name=basename(path);
-  if(/\.(png|jpe?g|webp|bmp|tiff?)$/i.test(name)) return importMedia(name,target=>copyMedia(createReadStream(path),target,file.size));
+  if(stillImage.test(name)) return importMedia(name,target=>copyMedia(createReadStream(path),target,file.size));
   return withTask(`Import ${name}`,async()=>{
     const existing=await recoverCopy(path,file.size);
     if(existing) return inspectImportedMedia(existing,name,true);
@@ -180,7 +182,7 @@ async function recoverCopy(path,size) {
 }
 
 function importMedia(name, transfer) {
-  const still=/\.(png|jpe?g|webp|bmp|tiff?)$/i.test(name);
+  const still=stillImage.test(name);
   return withTask(`Import ${name}`,()=>ingest(randomUUID(),name,async path=>{
     if(!still) return transfer(path);
     const original=path+'.image';
@@ -198,17 +200,27 @@ async function addAudio(name, prepare) {
   try {
     const target = join(folder,'source');
     await prepare(folder,target);
-    const info = JSON.parse(await run(ffprobe,['-v','error','-select_streams','a:0','-show_entries','stream=duration','-of','json',target]));
-    const frames = Math.ceil(Number(info.streams[0]?.duration)*fps);
-    if (!frame(frames) || !frames) throw new Error('Choose a file containing readable audio.');
-    const asset = { id,name,frames,kind:'audio',audio:0 };
-    await writeFile(join(folder,'info.json'),JSON.stringify(asset));
-    assets.set(id,asset);
-    return asset;
+    return await registerAudio(folder,id,name);
   } catch (error) {
     await rm(folder,{recursive:true,force:true});
     throw error;
   }
+}
+
+async function registerAudio(folder,id,name) {
+  const info = JSON.parse(await run(ffprobe,['-v','error','-select_streams','a:0','-show_entries','stream=duration','-of','json','source'],{cwd:folder}));
+  const frames = Math.ceil(Number(info.streams[0]?.duration)*fps);
+  if (!frame(frames) || !frames) throw new Error('Choose a file containing readable audio.');
+  const asset = { id,name,frames,kind:'audio',audio:0 };
+  await writeFile(join(folder,'info.partial'),JSON.stringify(asset));
+  await rename(join(folder,'info.partial'),join(folder,'info.json'));
+  assets.set(id,asset);
+  return asset;
+}
+
+async function normalizeAudio(folder,input,output) {
+  taskStage('Preparing audio');
+  await run(ffmpeg,['-nostdin','-v','error','-i',input,'-map','0:a:0','-vn','-c:a','pcm_s16le','-ar','48000','-ac','2','-f','wav',output],{cwd:folder});
 }
 
 function audioName(req) {
@@ -220,8 +232,7 @@ function importAudio(req) {
   return addAudio(audioName(req),async (folder,target) => {
     const incoming=join(folder,'incoming');
     await copyMedia(req,incoming,Number(req.headers['x-file-size'] || req.headers['content-length']));
-    taskStage('Preparing audio');
-    await run(ffmpeg,['-nostdin','-v','error','-i',incoming,'-map','0:a:0','-vn','-c:a','pcm_s16le','-ar','48000','-ac','2','-f','wav',target]);
+    await normalizeAudio(folder,incoming,target);
     await rm(incoming);
   });
 }
@@ -260,7 +271,7 @@ async function ingest(id, name, writeSource, options={}) {
   importingFolders.add(id);
   try {
     await writeSource(join(folder, 'source'));
-    return await inspectImportedMedia(id,name,options.registerEarly);
+    return await inspectImportedMedia(id,name,options.registerEarly,options.composition);
   } catch (error) {
     await rm(folder, { recursive: true, force: true });
     throw error;
@@ -290,16 +301,21 @@ function videoDuration(video, format) {
   return Number(format?.duration);
 }
 
-async function inspectImportedMedia(id,name,registerEarly) {
+async function inspectImportedMedia(id,name,registerEarly,composition) {
   const folder=join(assetRoot,id);
   taskStage('Reading video information');
   const probe=JSON.parse(await run(ffprobe,['-v','error','-show_streams','-show_format','-of','json','source'],{cwd:folder}));
   const video=probe.streams.find(stream=>stream.codec_type==='video'&&!stream.disposition?.attached_pic);
-  if(!video) throw new Error('This file does not contain a readable video stream.');
   const audio=probe.streams.find(stream=>stream.codec_type==='audio');
+  if(!video) {
+    if(!audio) throw new Error('This file does not contain readable video, image or audio.');
+    await normalizeAudio(folder,'source','audio.partial');
+    await rename(join(folder,'audio.partial'),join(folder,'source'));
+    return registerAudio(folder,id,name);
+  }
   const duration=videoDuration(video,probe.format);
   const alpha=/^(argb|rgba|abgr|bgra|yuva|gbrap)/.test(video.pix_fmt || '');
-  const nativeMime=nativePlayback(name,probe.format?.format_name || '',video,audio,alpha);
+  const nativeMime=nativePlayback(composition ? 'composition.mp4' : name,probe.format?.format_name || '',video,audio,alpha);
   let frames=Math.round(duration*fps);
   const needsPreview=!registerEarly || !Number.isSafeInteger(frames) || frames<1;
   let thumbInput='source', thumbTrack=video.index;
@@ -320,6 +336,7 @@ async function inspectImportedMedia(id,name,registerEarly) {
     '-vf',encodeSize(320,180),'-update','1','thumb.jpg'],{cwd:folder});
   const asset={id,name,frames,width:video.width,height:video.height,alpha,halfReady:needsPreview,
     nativeMime:needsPreview?null:nativeMime,video:video.index,audio:audio?.index??null};
+  if (composition) asset.composition = true;
   await writeFile(join(folder,'info.partial'),JSON.stringify(asset));
   await rename(join(folder,'info.partial'),join(folder,'info.json'));
   assets.set(id,asset);
@@ -635,7 +652,7 @@ function readTimeline(project) {
     return title;
   }).sort((a, b) => Number(a.track || 1) - Number(b.track || 1) || a.start - b.start);
   const videoFrames = Math.max(0,...clips.map(clip=>clip.start+clip.len));
-  const total = Math.max(videoFrames, ...[...titles,...overlays,...sounds].map(clip => clip.start + clip.len));
+  const total = sequenceDuration(project, Math.max(videoFrames, ...[...titles,...overlays,...sounds].map(clip => clip.start + clip.len)));
   if (!total) throw new Error('Add media to the timeline first.');
   return { clips, overlays, titles, sounds, videoFrames, total,
     trackSettings:project.trackSettings,masterMuted:project.masterMuted,masterGainDb:project.masterGainDb };
@@ -647,7 +664,12 @@ async function render(job, project, timeline) {
     await mkdir(folder);
     const { clips, overlays, videoFrames, total } = timeline;
     const titles=timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
-    const [width, height] = canvasSize(project.resolution,project.aspect);
+    const [outputWidth, outputHeight] = sequenceSize(project);
+    const odd = (outputWidth % 2 || outputHeight % 2) !== 0;
+    const width = outputWidth + outputWidth % 2;
+    const height = outputHeight + outputHeight % 2;
+    const range = exportRange(project, total);
+    if (!range.frames) throw new Error('The export Out point must follow the In point.');
     const filter = [];
     const args = ['-nostdin', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-filter_complex_threads', '2'];
     const segments=[];
@@ -752,6 +774,10 @@ async function render(job, project, timeline) {
       composite(filter,video,'captions',{len:captionEnd},0,'withcaptions',width,height);
       video='withcaptions';
     }
+    const pixelFormat = odd ? 'yuv444p' : 'yuv420p';
+    const crop = odd ? `,format=${pixelFormat},crop=${outputWidth}:${outputHeight}:0:0:exact=1` : '';
+    filter.push(`[${video}]trim=start_frame=${range.start}:end_frame=${range.end},setpts=PTS-STARTPTS${crop}[picture]`);
+    filter.push(`[audio]atrim=start_sample=${range.start * 1600}:end_sample=${range.end * 1600},asetpts=PTS-STARTPTS[sound]`);
     await writeFile(join(folder, 'graph.ffscript'), filter.join(';\n'));
     let buffered = '';
     const quality = { high:[17,24,'224k'], balanced:[22,31,'160k'], small:[29,40,'96k'] };
@@ -761,21 +787,21 @@ async function render(job, project, timeline) {
       : ['-c:v','libx264','-preset','veryfast','-crf',String(h264),'-c:a','aac','-b:a',bitrate,'-movflags','+faststart'];
     await run(ffmpeg, [
       ...args, '-/filter_complex', 'graph.ffscript',
-      '-map', `[${video}]`, '-map', '[audio]',
-      ...encoding,'-pix_fmt','yuv420p',`video.${job.format}`
+      '-map', '[picture]', '-map', '[sound]',
+      ...encoding,'-pix_fmt',pixelFormat,`video.${job.format}`
     ], { cwd: folder, progress(chunk) {
       const lines = (buffered + chunk).split('\n');
       buffered = lines.pop();
       for (const line of lines) {
         const match = line.match(/^frame=\s*(\d+)/);
         if (match) {
-          job.progress = Math.min(99, Math.round(Number(match[1]) / total * 100));
-          taskStage('Rendering video',job.progress);
+          job.progress = Math.min(99, Math.round(Number(match[1]) / range.frames * 100));
+          taskStage(job.composition ? 'Rendering composition' : 'Rendering video',job.progress);
         }
       }
     } });
     job.progress = 100;
-    job.status = 'ready';
+    if (!job.composition) job.status = 'ready';
   } catch (error) {
     job.status = 'error';
     job.error = error.message;
@@ -862,7 +888,11 @@ const routes = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/style.css': ['style.css', 'text/css; charset=utf-8'],
   '/workspace.css': ['workspace.css', 'text/css; charset=utf-8'],
+  '/projects.css': ['projects.css', 'text/css; charset=utf-8'],
   '/editor.js': ['editor.js', 'text/javascript; charset=utf-8'],
+  '/projects.mjs': ['projects.mjs', 'text/javascript; charset=utf-8'],
+  '/sequences.mjs': ['sequences.mjs', 'text/javascript; charset=utf-8'],
+  '/led.mjs': ['led.mjs', 'text/javascript; charset=utf-8'],
   '/motion.mjs': ['motion.mjs', 'text/javascript; charset=utf-8'],
   '/text.mjs': ['text.mjs','text/javascript; charset=utf-8'],
   '/sound.mjs': ['sound.mjs','text/javascript; charset=utf-8'],
@@ -919,7 +949,7 @@ const server = createServer(async (req, res) => {
       const match = /^\/api\/exports\/([a-f\d-]+)(\/download)?$/.exec(path);
       const job = match && exports.get(match[1]);
       if (job && !match[2]) return json(res, 200, job);
-      if (job?.status === 'ready') {
+      if (job?.status === 'ready' && !job.composition) {
         const type = { webm:'video/webm', mov:'video/quicktime', mp4:'video/mp4' }[job.format];
         return await serveFile(req, res, getRender(job.id).path, type, job.filename);
       }
@@ -942,21 +972,37 @@ const server = createServer(async (req, res) => {
         const body = await requestJson(req);
         return json(res,201,await withTask('Object removal',()=>removeObject(sourceClip(body),body.box,body.follow === true)));
       }
-      if (path === '/api/exports') {
-        const project = await requestJson(req);
+      if (path === '/api/exports' || path === '/api/compositions') {
+        const composition = path === '/api/compositions';
+        const request = await requestJson(req);
+        const project = composition ? { ...request, markIn:null, markOut:null, quality:'high' } : request;
         const timeline = readTimeline(project);
-        if ([...exports.values()].some(job => job.status === 'rendering')) {
+        if (!composition && [...exports.values()].some(job => !job.composition && job.status === 'rendering')) {
           return json(res, 409, { error: 'Wait for the active export to finish.' });
         }
         const name = String(project.name || 'Framecut').replace(/[^a-zA-Z0-9 _-]/g, '').trim().slice(0, 80) || 'Framecut';
-        const format = ['mov','webm'].includes(project.format) ? project.format : 'mp4';
-        const job = { id: randomUUID(), status: 'rendering', progress: 0, filename: `${name}.${format}`, format };
+        const format = !composition && ['mov','webm'].includes(project.format) ? project.format : 'mp4';
+        const job = { id: randomUUID(), status: 'rendering', progress: 0, filename: `${name}.${format}`, format, composition };
         exports.set(job.id, job);
-        void withTask(`Export ${job.filename}`,async()=>{
-          taskStage('Preparing export');
+        void withTask(composition ? `Prepare composition · ${request.name || name}` : `Export ${job.filename}`,async()=>{
+          taskStage(composition ? 'Preparing composition' : 'Preparing export');
           await render(job,project,timeline);
           if(job.status==='error') throw new Error(job.error);
-        }).catch(()=>{});
+          if (composition) {
+            const folder = join(data, 'renders', job.id);
+            try {
+              const video = join(folder, `video.${format}`);
+              job.asset = await ingest(randomUUID(), String(request.name || name).slice(0,80),
+                destination => rename(video, destination), { registerEarly:true, composition:true });
+            } finally {
+              await rm(folder, {recursive:true, force:true}).catch(()=>{});
+            }
+            job.status = 'ready';
+          }
+        }).catch(error=>{
+          job.status = 'error';
+          job.error = error.message;
+        });
         return json(res, 202, job);
       }
     }

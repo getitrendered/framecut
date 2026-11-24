@@ -15,6 +15,8 @@ const axes= {
   'resize-tasks': { key:'tasks',axis:'y',direction:-1,read:()=>rect('.tasks-panel').height,range:()=>[45,Math.max(60,rect('.viewer').height*.56)] },
   'resize-tools': { key:'tools',axis:'y',direction:1,read:()=>rect('#tools').height,range:()=>[64,Math.max(90,rect('.inspector-scroll').height-125)] },
   'resize-tracks': { key:'tracks',axis:'y',direction:1,read:()=>current().tracks || 70,range:()=>[37,164] },
+  'resize-track-labels': { key:'trackLabels',axis:'x',direction:1,read:()=>rect('#track-labels').width,
+    range:()=>[95,Math.max(124,Math.min(400,rect('.timeline').width-200))] },
   'resize-source': { key:'source',axis:'y',direction:1,read:()=>rect('#source-video').height,range:()=>[65,Math.max(80,rect('.source').height*.7)] }
 };
 
@@ -23,7 +25,7 @@ function apply() {
   const root=workspace.style;
   for(const [key,property] of [
     ['left','--left-width'], ['right','--right-width'], ['tools','--tools-height'],
-    ['source','--source-height'], ['tasks','--tasks-height'], ['tracks','--video-row']
+    ['source','--source-height'], ['tasks','--tasks-height'], ['tracks','--video-row'], ['trackLabels','--track-label-width']
   ]) {
     if(Number.isFinite(layout[key])) {
       const config=Object.values(axes).find(item=>item.key===key);

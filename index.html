@@ -6,6 +6,7 @@
   <title>Framecut</title>
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/workspace.css">
+  <link rel="stylesheet" href="/projects.css">
   <script type="module" src="/editor.js"></script>
 </head>
 <body>
@@ -13,17 +14,20 @@
     <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span> Framecut</div>
     <strong class="apps-heading">Apps</strong>
     <div class="top-actions">
+      <button id="import" class="secondary" type="button" title="Import media, subtitles, LUTs or 3D models" hidden>＋ Import</button>
       <button id="activity-toggle" class="secondary" aria-expanded="false" aria-controls="activity-drawer"><span id="activity-label">Tasks</span><progress id="activity-progress" max="100" hidden></progress></button>
       <button id="updates-open" class="secondary" hidden>Updates</button>
       <span id="save-state" class="save-state">Saved locally</span>
       <button id="export" class="primary" disabled>Export <span aria-hidden="true">↗</span></button>
     </div>
   </header>
+  <output id="global-import-status" class="panel" role="status" hidden></output>
   <aside id="activity-drawer" aria-label="Background tasks" class="panel" hidden>
     <div class="panel-head"><h2>Background tasks</h2><button id="activity-close" class="icon" aria-label="Close background tasks">×</button></div>
     <div id="activity-list"></div>
   </aside>
   <nav id="app-nav" class="app-nav" aria-label="Workspaces">
+    <button id="projects-open" type="button">‹ Projects</button>
     <button data-page="footage" type="button">Footage</button>
     <button data-page="edit" type="button">Edit</button>
     <button data-page="text" type="button">Text &amp; Subtitles</button>
@@ -31,8 +35,28 @@
     <button data-page="effects" type="button">Effects</button>
     <button data-page="animation" type="button">Animation</button>
     <button data-page="color" type="button">Compositing</button>
+    <button data-page="led" type="button">LED Wall</button>
+    <button id="sequence-settings" type="button">Settings</button>
     <input id="project" class="project-name" maxlength="80" aria-label="Project name" value="Untitled project">
   </nav>
+  <main id="projects-home" class="projects-home" hidden>
+    <div class="projects-heading">
+      <div><h1>Projects</h1><p>Open an edit or start a new project.</p></div>
+      <button id="project-create" class="primary" type="button">＋ New project</button>
+    </div>
+    <div class="projects-toolbar">
+      <label class="project-search"><input id="project-search" type="search" placeholder="Search projects" aria-label="Search projects"></label>
+      <output id="project-count" class="subtle"></output>
+    </div>
+    <div id="project-list" class="project-list"></div>
+    <output id="projects-status" role="status"></output>
+  </main>
+  <main id="led-workspace" class="led-workspace" aria-label="LED Wall simulator" hidden></main>
+  <aside id="composition-drawer" class="panel" aria-label="Compositions" hidden>
+    <div class="panel-head"><h2>Compositions</h2><button id="compositions-close" class="icon" type="button" aria-label="Close compositions">×</button></div>
+    <div class="drawer-actions"><button id="composition-create" class="primary" type="button">＋ New composition</button></div>
+    <div id="composition-list"></div>
+  </aside>
   <main data-page="footage" id="workspace-root">
     <div id="resize-left" class="pane-grip column-grip" role="separator" aria-label="Resize left pane" aria-orientation="vertical" tabindex="0"></div>
     <div id="resize-right" class="pane-grip column-grip" role="separator" aria-label="Resize inspector or source pane" aria-orientation="vertical" tabindex="0"></div>
@@ -47,15 +71,13 @@
         <div class="media-sort"><input id="media-search" placeholder="Search footage" aria-label="Search footage"><select id="media-sort" aria-label="Sort footage"><option value="recent">Newest first</option><option value="name">Name A–Z</option><option value="duration">Longest first</option></select></div>
         <div id="bin" class="bin"></div>
         <div class="import-area">
-          <button id="import" class="secondary">＋ Import video or image</button>
           <output id="media-status" role="status" hidden></output>
           <progress id="import-progress" max="100" aria-label="Import progress" hidden></progress>
-          <input id="files" type="file" accept="video/*,.mp4,.webm,.avi,.mov,.m4v,.mkv,.wmv,.flv,.ogv,.mxf,.mpg,.mpeg,.ts,.mts,.m2ts,image/png,image/jpeg,image/webp,image/bmp,image/tiff" multiple hidden>
         </div>
       </aside>
       <aside class="panel source" aria-label="Source preview">
         <div class="panel-head"><h2>Source preview</h2></div>
-        <div class="source-body"><video id="source-video" controls preload="metadata" hidden></video><div id="resize-source" class="pane-grip row-grip" role="separator" aria-label="Resize source preview" aria-orientation="horizontal" tabindex="0" hidden></div><p id="source-info" class="subtle">Select footage to preview it.</p><label id="source-folder-field" class="property" hidden><span>Move footage to</span><select id="source-folder"></select></label><div id="source-actions" class="inline-actions"></div></div>
+        <div class="source-body"><video id="source-video" controls preload="metadata" hidden></video><audio id="source-audio" controls preload="metadata" hidden></audio><div id="resize-source" class="pane-grip row-grip" role="separator" aria-label="Resize source preview" aria-orientation="horizontal" tabindex="0" hidden></div><p id="source-info" class="subtle">Select footage to preview it.</p><label id="source-folder-field" class="property" hidden><span>Move footage to</span><select id="source-folder"></select></label><div id="source-actions" class="inline-actions"></div></div>
       </aside>
       <section class="panel viewer" aria-label="Program monitor">
         <div class="panel-head"><h2>Preview</h2><select id="preview-quality" aria-label="Preview quality"><option value="auto" selected>Auto</option><option value="full">Full</option><option value="half">Half</option><option value="quarter">Quarter</option><option value="low">Low</option></select></div>
@@ -80,7 +102,7 @@
           </div>
           <output id="duration" class="timecode subtle">00:00:00:00</output>
         </div>
-        <div class="preview-settings"><span id="preview-format"></span><select id="aspect" aria-label="Project aspect ratio"><option value="landscape">Landscape</option><option value="portrait">9:16 portrait</option><option value="square">1:1 square</option></select><button id="place-text" class="icon" aria-label="Place text in preview" title="Place text in preview">T</button></div>
+        <div class="preview-settings"><span id="preview-format"></span><select id="aspect" aria-label="Project aspect ratio"><option value="landscape">Landscape</option><option value="portrait">9:16 portrait</option><option value="square">1:1 square</option><option value="custom">Custom canvas</option></select><button id="place-text" class="icon" aria-label="Place text in preview" title="Place text in preview">T</button></div>
         <div id="resize-tasks" class="pane-grip row-grip" role="separator" aria-label="Resize preview and tasks" aria-orientation="horizontal" tabindex="0"></div>
         <div class="tasks-panel"><h2>Tasks</h2><div id="task-list" role="status">Ready</div><progress id="workspace-progress" max="100" aria-label="Task progress" hidden></progress></div>
       </section>
@@ -90,6 +112,10 @@
       </aside>
     </section>
     <section class="panel timeline" aria-labelledby="timeline-heading">
+      <div class="sequence-bar">
+        <div id="sequence-tabs" role="group" aria-label="Timelines"></div>
+        <button id="compositions-open" class="secondary" type="button" aria-controls="composition-drawer" aria-expanded="false">Compositions</button>
+      </div>
       <div class="timeline-bar">
         <h2 id="timeline-heading">Timeline</h2>
         <div class="edit-buttons">
@@ -105,7 +131,14 @@
         </div>
         <div class="zoom"><label for="zoom" title="Scroll to pan. Shift+scroll to zoom.">Zoom</label><input id="zoom" type="range" min="1" max="220" value="70"><button id="fit" class="icon" title="Fit timeline to view">Fit</button></div>
       </div>
+      <div id="range-controls" class="range-controls">
+        <button id="mark-in" type="button" class="secondary" title="Set In at the playhead (I)">Set In</button>
+        <button id="mark-out" type="button" class="secondary" title="Set Out at the playhead (O)">Set Out</button>
+        <button id="clear-range" type="button" class="secondary" hidden>Clear range</button>
+        <span id="timeline-range" class="timecode subtle"></span>
+      </div>
       <div class="timeline-grid">
+        <div id="resize-track-labels" class="pane-grip column-grip" role="separator" aria-label="Resize track labels" aria-orientation="vertical" tabindex="0"></div>
         <div id="track-labels" class="tracks" aria-label="Track controls"></div>
         <div id="scroll" class="timeline-scroll">
           <div id="track-space" class="track-space">
@@ -125,18 +158,44 @@
       <footer><span id="status" role="status">Ready</span><span class="shortcuts">Space play · S split · Delete remove</span></footer>
     </section>
   </main>
+  <dialog id="sequence-dialog" aria-labelledby="sequence-dialog-title">
+    <form id="sequence-form">
+      <div class="dialog-head"><h2 id="sequence-dialog-title">Project settings</h2><button id="sequence-close" class="icon" type="button" aria-label="Close settings">×</button></div>
+      <label class="property"><span>Name</span><input id="sequence-name" maxlength="80" required></label>
+      <label class="property"><span>Canvas preset</span>
+        <select id="canvas-preset" aria-label="Canvas preset">
+          <option value="custom">Custom dimensions</option><option value="1920x1080">1920 × 1080 · Full HD</option>
+          <option value="1080x1920">1080 × 1920 · Portrait</option><option value="1080x1080">1080 × 1080 · Square</option>
+          <option value="2048x1080">2048 × 1080 · DCI 2K</option><option value="2560x1440">2560 × 1440 · QHD</option>
+          <option value="3840x2160">3840 × 2160 · UHD</option>
+        </select>
+      </label>
+      <div class="canvas-fields">
+        <label class="property"><span>Width (px)</span><input id="canvas-width" type="number" min="2" max="8192" required></label>
+        <label class="property"><span>Height (px)</span><input id="canvas-height" type="number" min="2" max="8192" required></label>
+        <button id="canvas-double" class="secondary" type="button" title="Double both dimensions, keeping the aspect ratio">×2</button>
+      </div>
+      <output id="canvas-ratio" class="subtle"></output>
+      <label class="property"><span>Duration</span><select id="sequence-length-mode" aria-label="Duration"><option value="auto">Automatic · follows the timeline</option><option value="fixed">Fixed duration</option></select></label>
+      <label id="sequence-length-field" class="property" hidden><span>Fixed duration (seconds)</span><input id="sequence-length" type="number" min="0.033333" max="86400" step="any" value="10"></label>
+      <output id="sequence-form-status" role="status"></output>
+      <div class="dialog-actions"><button id="sequence-submit" class="primary">Save settings</button></div>
+    </form>
+  </dialog>
   <dialog id="export-dialog">
     <form id="export-form">
       <div class="dialog-head"><h2>Export video</h2><button id="close-dialog" class="icon" type="button" aria-label="Close export">×</button></div>
-      <label for="resolution">Resolution</label>
+      <label for="resolution">Export dimensions</label>
       <select id="resolution">
+        <option value="canvas" selected>Match canvas</option>
         <option value="480">854 × 480 · Preview</option>
         <option value="720">1280 × 720 · HD</option>
-        <option value="1080" selected>1920 × 1080 · Full HD</option>
+        <option value="1080">1920 × 1080 · Full HD</option>
         <option value="dci">2048 × 1080 · DCI 2K</option>
         <option value="1440">2560 × 1440 · QHD</option>
         <option value="2160">3840 × 2160 · 4K UHD</option>
       </select>
+      <label class="export-range-choice"><input id="export-use-range" type="checkbox" checked> Use timeline In/Out range</label>
       <label for="export-format">Format</label><select id="export-format"><option value="mp4">MP4 · H.264</option><option value="mov">MOV · H.264</option><option value="webm">WebM · VP9</option></select>
       <label for="export-quality">Quality</label><select id="export-quality"><option value="high">High</option><option value="balanced">Balanced</option><option value="small">Small preview</option></select>
       <p id="export-summary" class="subtle">30 fps · Stereo</p>
@@ -145,10 +204,15 @@
       <div class="dialog-actions"><button id="render" class="primary" type="submit">Render video</button><a id="download" class="primary" hidden>Download video ↓</a></div>
     </form>
   </dialog>
-  <input type="file" id="lut-file" accept=".cube" hidden>
-  <input type="file" id="model-file" accept=".obj" hidden>
-  <input type="file" id="subtitle-file" accept=".srt,.txt" hidden>
-  <input type="file" id="audio-file" accept="audio/*,.wav,.m4a,.flac,.aiff,.ogg,.mp3,.aac" multiple hidden>
+  <input type="file" id="files" multiple hidden>
+  <dialog id="timeline-action">
+    <form id="timeline-action-form">
+      <div class="dialog-head"><h2 id="timeline-action-title"></h2><button id="timeline-action-close" class="icon" type="button" aria-label="Close">×</button></div>
+      <label class="property"><span id="timeline-action-label"></span><input id="timeline-action-value" required></label>
+      <p id="timeline-action-help" class="subtle"></p>
+      <div class="dialog-actions"><button id="timeline-action-submit" class="primary">Apply</button></div>
+    </form>
+  </dialog>
   <dialog id="updates-dialog" aria-labelledby="updates-title">
     <div class="dialog-head"><h2 id="updates-title">Framecut updates</h2><button id="updates-close" class="icon" type="button" aria-label="Close updates">×</button></div>
     <p id="updates-version" class="subtle"></p>
