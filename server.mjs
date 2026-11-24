@@ -17,6 +17,7 @@ import { soundSettings, soundWave } from './sound.mjs';
 import { findLoop } from './loop.mjs';
 import { clipMix, trackOf, trackSettings } from './tracks.mjs';
 import { activityList, cancelTask, taskSignal, taskStage, withTask } from './activity.mjs';
+import { backgroundKey, keyParameters } from './keying.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const data = resolve(process.env.FRAMECUT_DATA || join(root, 'data'));
@@ -293,10 +294,10 @@ async function ingest(id, name, writeSource, options={}) {
 }
 
 function nativePlayback(name,format,video,audio,alpha) {
-  if(alpha) return null;
   const a=audio?.codec_name;
   if(/\.webm$/i.test(name) && format.includes('webm') && ['vp8','vp9','av1'].includes(video.codec_name) &&
     (!a || ['opus','vorbis'].includes(a))) return 'video/webm';
+  if(alpha) return null;
   if(/\.(mp4|m4v)$/i.test(name) && format.includes('mp4') && video.codec_name==='h264' &&
     ['yuv420p','yuvj420p'].includes(video.pix_fmt) && (!a || ['aac','mp3'].includes(a))) return 'video/mp4';
   return null;
@@ -326,7 +327,7 @@ async function inspectImportedMedia(id,name,registerEarly,composition) {
     return registerAudio(folder,id,name);
   }
   const duration=videoDuration(video,probe.format);
-  const alpha=/^(argb|rgba|abgr|bgra|yuva|gbrap)/.test(video.pix_fmt || '');
+  const alpha=video.tags?.alpha_mode==='1' || /^(argb|rgba|abgr|bgra|yuva|gbrap)/.test(video.pix_fmt || '');
   const nativeMime=nativePlayback(composition ? 'composition.mp4' : name,probe.format?.format_name || '',video,audio,alpha);
   let frames=Math.round(duration*fps);
   const needsPreview=!registerEarly || !Number.isSafeInteger(frames) || frames<1;
@@ -347,7 +348,8 @@ async function inspectImportedMedia(id,name,registerEarly,composition) {
   await run(ffmpeg,['-y','-nostdin','-v','error','-i',thumbInput,'-map',`0:${thumbTrack}`,'-frames:v','1',
     '-vf',encodeSize(320,180),'-update','1','thumb.jpg'],{cwd:folder});
   const asset={id,name,frames,width:video.width,height:video.height,alpha,halfReady:needsPreview,
-    nativeMime:needsPreview?null:nativeMime,video:video.index,audio:audio?.index??null};
+    nativeMime:needsPreview?null:nativeMime,video:video.index,audio:audio?.index??null,
+    matrix:video.color_space,fullRange:video.color_range==='pc',codec:video.codec_name};
   if (composition) asset.composition = true;
   await writeFile(join(folder,'info.partial'),JSON.stringify(asset));
   await rename(join(folder,'info.partial'),join(folder,'info.json'));
@@ -395,7 +397,7 @@ async function proxy(asset, quality, lut) {
     if (lut) filters.push(`lut3d=file=../../luts/${lut}.cube`);
     const encoding = asset.alpha ? ['-c:v','libvpx-vp9','-deadline','realtime','-cpu-used','6','-auto-alt-ref','0','-b:v','0','-crf','22','-pix_fmt','yuva420p','-c:a','libopus']
       : ['-c:v','libx264','-preset','ultrafast','-crf',quality === 'full' ? '17' : '25','-pix_fmt','yuv420p','-c:a','aac','-ac','2','-movflags','+faststart'];
-    const task = withTask(`Preview ${asset.name}`,()=>runTimed(['-y','-nostdin','-v','error','-fflags','+genpts','-i','source','-map',`0:${asset.video}`,
+    const task = withTask(`Preview ${asset.name}`,()=>runTimed(['-y','-nostdin','-v','error','-fflags','+genpts',...alphaDecoder(asset),'-i','source','-map',`0:${asset.video}`,
       ...(asset.audio === null ? [] : ['-map',`0:${asset.audio}`]),'-vf',filters.join(','),
       ...encoding,part], { cwd:folder },'Transcoding preview',asset.frames/fps).then(()=>rename(part,href)))
       .finally(() => previews.delete(href));
@@ -733,9 +735,16 @@ function timelineSection(timeline, {start,end}) {
   };
 }
 
+function alphaDecoder(asset) {
+  if (!asset.alpha) return [];
+  if (asset.codec==='vp9') return ['-c:v','libvpx-vp9'];
+  if (asset.codec==='vp8') return ['-c:v','libvpx'];
+  return [];
+}
+
 function addRenderInput(args, clip, batch) {
   if (batch) args.push('-threads','1');
-  args.push('-ss',(clip.in/fps).toFixed(6),'-i',`../../media/${clip.asset.id}/source`);
+  args.push('-ss',(clip.in/fps).toFixed(6),...alphaDecoder(clip.asset),'-i',`../../media/${clip.asset.id}/source`);
 }
 
 async function withRenderSections(folder, sections, ext, prepare, merge) {
@@ -768,8 +777,10 @@ async function render(job, project, timeline) {
     const quality = { high:[17,24,'224k'], balanced:[22,31,'160k'], small:[29,40,'96k'] };
     const [h264, vp9, bitrate] = Object.hasOwn(quality,project.quality) ? quality[project.quality] : quality.high;
     const webm = job.format==='webm';
+    const transparent = webm && project.transparent===true;
     const videoEncoding = webm ? ['-c:v','libvpx-vp9','-deadline','good','-cpu-used','5','-b:v','0','-crf',String(vp9)]
       : ['-c:v','libx264','-preset','veryfast','-crf',String(h264)];
+    if (transparent) videoEncoding.push('-auto-alt-ref','0');
     const audioEncoding = ['-c:a',webm?'libopus':'aac','-b:a',bitrate];
     const muxOptions = webm ? [] : ['-movflags','+faststart'];
     const output = `video.${job.format}`;
@@ -787,13 +798,13 @@ async function render(job, project, timeline) {
     if (windowCost<=renderInputLimit) {
       const part = window.start===0 && window.end===timeline.total ? timeline : timelineSection(timeline,window);
       const localRange = { start:range.start-window.start, end:range.end-window.start, frames:range.frames };
-      await renderSection(folder,project,part,localRange,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99),fonts);
+      await renderSection(folder,project,part,localRange,output,[...videoEncoding,...audioEncoding,...muxOptions],false,frame=>report(frame,99),fonts,transparent);
     } else {
       const sections = divideTimeline(inputs,range.start,range.end,renderCost);
-      await withRenderSections(folder,sections,'nut',async(file,section)=>{
+      await withRenderSections(folder,sections,transparent?'mkv':'nut',async(file,section)=>{
         const part = timelineSection(timeline,section);
         await renderSection(folder,project,part,{start:0,end:part.total,frames:part.total},file,
-          [...videoEncoding,'-c:a','pcm_f32le'],true,frame=>report(section.start-range.start+frame,95),fonts);
+          [...videoEncoding,'-c:a','pcm_f32le'],true,frame=>report(section.start-range.start+frame,95),fonts,transparent);
       },async list=>{
         job.progress = 96;
         await runTimed(['-nostdin','-v','error','-f','concat','-i',list,'-map','0:v:0','-map','0:a:0','-c:v','copy',
@@ -808,7 +819,7 @@ async function render(job, project, timeline) {
   }
 }
 
-async function renderSection(folder, project, timeline, range, output, encoding, batch, onFrame, fonts) {
+async function renderSection(folder, project, timeline, range, output, encoding, batch, onFrame, fonts, transparent) {
   const { clips, overlays, videoFrames, total } = timeline;
   const titles=timeline.titles.filter(title=>!trackSettings(timeline,trackOf(title)).muted);
   const [outputWidth, outputHeight] = sequenceSize(project);
@@ -818,20 +829,21 @@ async function renderSection(folder, project, timeline, range, output, encoding,
   const filter = [];
   const args = ['-nostdin', '-v', 'error', '-progress', 'pipe:1', '-nostats', '-filter_complex_threads', '2'];
   const segments=[];
+  const background = `color=c=${transparent?'black@0':'black'}:s=${width}x${height}:r=${fps}${transparent?',format=yuva420p':''}`;
   let previous=0;
   const gap=(frames)=>{
     const label='gap'+segments.length;
-    filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${frames}[${label}]`);
+    filter.push(`${background},trim=end_frame=${frames}[${label}]`);
     segments.push(label);
   };
   for (const [i, clip] of clips.entries()) {
     if(clip.start>previous) gap(clip.start-previous);
     addRenderInput(args,clip,batch);
-    const effects = hasVideoFraming(clip) || Object.keys(properties).some(key => key!=='reveal' && changed(clip,key));
-    videoStream(filter, clip, i, width,height, effects, `vs${i}`);
+    const effects = backgroundKey(clip.backgroundKey) || hasVideoFraming(clip) || Object.keys(properties).some(key => key!=='reveal' && changed(clip,key));
+    videoStream(filter, clip, i, width,height, Boolean(effects || transparent), `vs${i}`);
     if (effects) {
-      filter.push(`color=c=black:s=${width}x${height}:r=${fps},trim=end_frame=${clip.len}[black${i}]`);
-      composite(filter, `black${i}`, `vs${i}`, clip, 0, `v${i}`, width, height);
+      filter.push(`${background},trim=end_frame=${clip.len}[black${i}]`);
+      composite(filter, `black${i}`, `vs${i}`, clip, 0, `v${i}`, width, height,transparent);
     } else {
       filter.push(`[vs${i}]null[v${i}]`);
     }
@@ -849,7 +861,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
     addRenderInput(args,clip,batch);
     videoStream(filter,clip,input,width,height,true,`layer${index}`);
     filter.push(`[layer${index}]setpts=PTS+${clip.start}/(${fps}*TB)[layerdelay${index}]`);
-    composite(filter,video,`layerdelay${index}`,clip,clip.start,`layered${index}`,width,height);
+    composite(filter,video,`layerdelay${index}`,clip,clip.start,`layered${index}`,width,height,transparent);
     video = `layered${index}`;
   }
   audioFilter(args,filter,timeline,{reuse:true,batch,limit:!batch});
@@ -937,7 +949,7 @@ async function renderSection(folder, project, timeline, range, output, encoding,
       filter.push([canvas,...shadow,...draw,finish].join(',')+`[title${i}]`);
     }
     if (!caption) {
-      composite(filter,video,`title${i}`,title,title.start,`titled${i}`,width,height);
+      composite(filter,video,`title${i}`,title,title.start,`titled${i}`,width,height,transparent);
       video = `titled${i}`;
     } else {
       if(title.start>captionEnd) captionGap(title.start-captionEnd);
@@ -951,10 +963,10 @@ async function renderSection(folder, project, timeline, range, output, encoding,
   }
   if(captionSegments.length) {
     filter.push(`${captionSegments.map(label=>`[${label}]`).join('')}concat=n=${captionSegments.length}:v=1:a=0,${frameClock}[captions]`);
-    composite(filter,video,'captions',{len:captionEnd},0,'withcaptions',width,height);
+    composite(filter,video,'captions',{len:captionEnd},0,'withcaptions',width,height,transparent);
     video='withcaptions';
   }
-  const pixelFormat = odd ? 'yuv444p' : 'yuv420p';
+  const pixelFormat = transparent ? 'yuva420p' : odd ? 'yuv444p' : 'yuv420p';
   const crop = odd ? `,format=${pixelFormat},crop=${outputWidth}:${outputHeight}:0:0:exact=1` : '';
   filter.push(`[${video}]trim=start_frame=${range.start}:end_frame=${range.end},setpts=PTS-STARTPTS${crop}[picture]`);
   filter.push(`[audio]atrim=start_sample=${range.start * 1600}:end_sample=${range.end * 1600},asetpts=PTS-STARTPTS[sound]`);
@@ -1042,10 +1054,44 @@ function videoStream(filter,clip,input,width,height,alpha,output) {
     `trim=start_frame=${offset}:end_frame=${offset+clip.len}`,'setpts=PTS-STARTPTS'];
   if (offset) chain.push(...trim);
   if (clip.lut && luts.has(clip.lut)) chain.push(`lut3d=file=../../luts/${clip.lut}.cube`);
+  const key = backgroundKey(clip.backgroundKey);
+  const source = `${input}:${clip.asset.video}`;
+  let current = source;
+  if (key) {
+    if (!offset) chain.push(...trim);
+    const params = keyParameters(key,clip.asset.matrix,clip.asset.fullRange);
+    chain.push('format=yuva444p');
+    const keyInput = `${output}keyinput`;
+    if (clip.asset.alpha) {
+      filter.push(`[${source}]${chain.join(',')},split[${keyInput}][${output}original]`);
+      filter.push(`[${output}original]alphaextract[${output}originalalpha]`);
+    } else filter.push(`[${source}]${chain.join(',')}[${keyInput}]`);
+    chain.length = 0;
+    current = `${output}keyed`;
+    const keyed = [];
+    if (key.mode==='luma') {
+      const range = clip.asset.fullRange ? 1 : 219/255;
+      const bottom = clip.asset.fullRange ? 0 : 16/255;
+      keyed.push(`lumakey=threshold=0:tolerance=${bottom+params.cutoff*range}:softness=${key.softness*range}`);
+    } else {
+      const uv = params.uv.map(value=>Math.min(255,Math.round(128+value*255)).toString(16).padStart(2,'0')).join('');
+      keyed.push(`chromakey=color=0x80${uv}:similarity=${Math.max(.00001,key.tolerance)}:blend=${key.softness}:yuv=1`);
+      if (params.spill && key.spill) {
+        const type = params.spill===1 ? 'green' : 'blue';
+        keyed.push(`despill=type=${type}:green=${params.spill===1?-key.spill:0}:blue=${params.spill===2?-key.spill:0}:alpha=0`);
+      }
+    }
+    if (clip.asset.alpha) {
+      filter.push(`[${keyInput}]${keyed.join(',')},split[${output}colors][${output}matte]`);
+      filter.push(`[${output}matte]alphaextract[${output}keyalpha]`);
+      filter.push(`[${output}originalalpha][${output}keyalpha]blend=all_mode=multiply[${output}alpha]`);
+      filter.push(`[${output}colors][${output}alpha]alphamerge[${current}]`);
+    } else filter.push(`[${keyInput}]${keyed.join(',')}[${current}]`);
+  }
   chain.push(`format=${alpha ? 'yuva420p' : 'yuv420p'}`,framing ? fitVideoFilter(clip,width,height) : encodeSize(width,height,alpha));
-  if (!offset) chain.push(...trim);
+  if (!offset && !key) chain.push(...trim);
   if (alpha) chain.push(...motionFilters(clip,framing));
-  filter.push(`[${input}:${clip.asset.video}]${chain.join(',')}[${output}]`);
+  filter.push(`[${current}]${chain.join(',')}[${output}]`);
 }
 
 function composite(filter, base, layer, clip, start, target, width, height, alpha=false) {
@@ -1102,6 +1148,8 @@ const routes = {
   '/sequences.mjs': ['sequences.mjs', 'text/javascript; charset=utf-8'],
   '/led.mjs': ['led.mjs', 'text/javascript; charset=utf-8'],
   '/motion.mjs': ['motion.mjs', 'text/javascript; charset=utf-8'],
+  '/keying.mjs': ['keying.mjs', 'text/javascript; charset=utf-8'],
+  '/key-preview.mjs': ['key-preview.mjs', 'text/javascript; charset=utf-8'],
   '/text.mjs': ['text.mjs','text/javascript; charset=utf-8'],
   '/sound.mjs': ['sound.mjs','text/javascript; charset=utf-8'],
   '/layout.mjs': ['layout.mjs','text/javascript; charset=utf-8'],

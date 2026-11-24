@@ -7,6 +7,8 @@ import { changesLockedClips, clipMix, clipsIn, gainDb, protectedTrack, trackOf, 
 import { contentDuration, exportRange, exportWindow, MAX_DURATION, sequenceDuration, sequenceSize } from '/sequences.mjs';
 import { catalogKey, compositionType, migrateProjectImports, projectControls, readCatalog } from '/projects.mjs';
 import { createLedWorkspace } from '/led.mjs';
+import { backgroundKey, keyPresets, sampledKey } from '/keying.mjs';
+import { createKeyPreview, readColorSample } from '/key-preview.mjs';
 import '/layout.mjs';
 const $ = id => document.getElementById(id);
 const fps = 30;
@@ -98,6 +100,9 @@ let trackingBox = null;
 let trackingArea = null;
 let tracked = null;
 let picking = false;
+let samplingKey = null;
+let matteClip = null;
+let keyDraft = null;
 let objectRemovalAvailable = false;
 let transcriptionAvailable = false;
 let transcribing = false;
@@ -1405,6 +1410,10 @@ function drawClipSelection(preview) {
 function refreshSelection() {
   stopTitlePosition();
   const clip=selection();
+  if (samplingKey && samplingKey!==clip?.id) stopBackgroundSample();
+  const clearMatte = matteClip && matteClip!==clip?.id;
+  if (clearMatte) matteClip=null;
+  if (keyDraft && keyDraft.id!==clip?.id) keyDraft=null;
   if(clip) selectTrack(trackOf(clip));
   drawClipSelection();
   renderInspector();
@@ -1415,6 +1424,7 @@ function refreshSelection() {
   for (const label of $('preview-titles').querySelectorAll('[data-preview-title]')) {
     label.classList.toggle('canvas-selected',isSelected(label.dataset.previewTitle));
   }
+  if (clearMatte) display(cursor);
 }
 
 function selectTrack(key) {
@@ -1726,6 +1736,7 @@ function renderInspector() {
     panel.append(node('h2', 'inspector-name', asset.name));
     const linked = clip.asset===compositionAssetKey(clip.composition);
     if (linked) panel.append(button('Open composition',()=>openSequence(clip.composition)));
+    else panel.append(backgroundKeyControls(clip,openGroups.has('Background key')));
     panel.append(videoTransformControls(clip,transformOpen));
     const timing = node('div', 'property-line');
     const remaining = laneNeighbors(clip).next - clip.start;
@@ -1909,6 +1920,66 @@ function group(label, ...children) {
   grid.append(...children);
   details.append(node('summary','',label),grid);
   return details;
+}
+
+function writeBackgroundKey(clip,key) {
+  if (!guardTrack(trackOf(clip))) return;
+  keyDraft = null;
+  if (!key) matteClip = null;
+  change(()=>{ if (key) clip.backgroundKey = key; else delete clip.backgroundKey; });
+}
+
+function backgroundKeyControls(clip,open) {
+  const active = backgroundKey(clip.backgroundKey);
+  const key = active || keyPresets.green;
+  const presets = node('div','key-options');
+  for (const [label,name] of [['Green','green'],['Blue','blue'],['Black','black']]) {
+    const control = button(label,()=>writeBackgroundKey(clip,{...keyPresets[name]}));
+    control.dataset.keyEdit = '';
+    presets.append(control);
+  }
+  const sample = button('Sample background',()=>beginBackgroundSample(clip));
+  sample.dataset.keyEdit = '';
+  sample.title = 'Click the background in the Preview canvas';
+  const controls = [choice('Key mode',[['off','Off'],['chroma','Chroma key · color'],['luma','Luma key · dark background']],active?.mode || 'off',mode=>{
+    writeBackgroundKey(clip,mode==='off'?null:mode==='luma'?{...keyPresets.black}:{...keyPresets.green});
+  }),sample,presets];
+  if (active) {
+    controls.push(colorControl('Sampled background color',key.color,color=>writeBackgroundKey(clip,{...key,color})),
+      keySlider('Tolerance','tolerance',key,clip,65),keySlider('Edge softness','softness',key,clip,50));
+    if (key.mode==='chroma') controls.push(keySlider('Spill suppression','spill',key,clip,100));
+    const show = node('input');
+    show.type = 'checkbox';
+    show.checked = matteClip===clip.id;
+    show.onchange = ()=>{
+      matteClip = show.checked ? clip.id : null;
+      if (cursor<clip.start || cursor>=clip.start+clip.len) setPosition(clip.start);
+      else display(cursor);
+    };
+    const check = node('label','check-row');
+    check.append(show,' Show matte');
+    controls.push(check);
+  }
+  const details = group('Background key',...controls);
+  details.classList.add('background-key-controls');
+  details.open = open || Boolean(active) || page==='effects' && effectCategory==='Keying';
+  return details;
+}
+
+function keySlider(label,property,key,clip,max) {
+  const slider = node('input');
+  slider.type='range'; slider.min=0; slider.max=max; slider.value=Math.round(key[property]*100);
+  const control = field(label,slider);
+  const amount = node('output','',`${slider.value}%`);
+  control.append(amount);
+  slider.oninput = ()=>{
+    if (!guardTrack(trackOf(clip))) return;
+    amount.textContent = `${slider.value}%`;
+    keyDraft = { id:clip.id,key:{...key,[property]:Number(slider.value)/100} };
+    display(cursor);
+  };
+  slider.onchange = ()=>writeBackgroundKey(clip,{...key,[property]:Number(slider.value)/100});
+  return control;
 }
 
 function editTitles(titles, update) {
@@ -2627,10 +2698,14 @@ function renderTools() {
     renderSoundTools(tools);
   } else if (page === 'effects') {
     const categories = node('select', 'tool-select');
-    for (const category of ['Motion','Transitions','Filters','3D & particles','Video tools']) categories.add(new Option(category));
+    for (const category of ['Motion','Transitions','Filters','3D & particles','Keying','Video tools']) categories.add(new Option(category));
     categories.value = effectCategory;
-    categories.onchange = () => { effectCategory = categories.value; if (effectCategory !== 'Video tools') cancelPicking(); renderTools(); };
+    categories.onchange = () => { effectCategory = categories.value; if (effectCategory !== 'Video tools') cancelPicking(); renderTools(); renderInspector(); refreshTrackControls(); };
     tools.append(categories);
+    if (effectCategory==='Keying') {
+      tools.append(node('p','subtle','Select the foreground clip. Use Background key in the Inspector to pick the screen color.'));
+      return;
+    }
     if (effectCategory === 'Video tools') {
       tools.append(button('Upscale selected footage', () => void upscale(clip), !clip?.asset || Boolean(clip.composition)),
         node('p', 'subtle', 'Upscale creates a new clip using Lanczos scaling.'),
@@ -2865,6 +2940,7 @@ function cancelPicking() {
 
 function beginPicking(clip) {
   if (!clip?.asset || clip.track) return;
+  stopBackgroundSample();
   stopTitlePosition();
   setPosition(clipStart(clip));
   trackingSource = clip.id;
@@ -2876,6 +2952,45 @@ function beginPicking(clip) {
 
 function previewPoint(event,rect) {
   return { x:(event.clientX-rect.left)/rect.width*100, y:(event.clientY-rect.top)/rect.height*100 };
+}
+
+function stopBackgroundSample() {
+  if (!samplingKey) return;
+  samplingKey = null;
+  $('stage').classList.remove('sampling-background');
+  display(cursor);
+}
+
+function beginBackgroundSample(clip) {
+  if (!guardTrack(trackOf(clip))) return;
+  if (samplingKey===clip.id) { stopBackgroundSample(); return; }
+  stopTextPlacement();
+  cancelPicking();
+  samplingKey = clip.id;
+  $('stage').classList.add('sampling-background');
+  if (cursor<clip.start || cursor>=clip.start+clip.len) { setPosition(clip.start); revealCursor(); }
+  else { pause(); display(cursor); }
+  notify('Click a clean area of the background in Preview.');
+}
+
+function pickBackground(event) {
+  const clip = selection();
+  const video = clip?.track ? overlayPlayers.get(clip.id) : activeClip?.id===clip?.id ? active : null;
+  if (clip?.id!==samplingKey || !video || video.readyState<2 || video.seeking) return notify('Wait for the selected frame to load.');
+  const rect = $('stage').getBoundingClientRect();
+  const local = cursor-clip.start;
+  const {w,h,aspect} = fittedMediaSize(clip,video);
+  const scale = valueAt(clip,'scale',local)/100;
+  const area = {w:w*scale,h:h*scale,aspect,angle:valueAt(clip,'rotation',local),
+    cx:.5+valueAt(clip,'x',local)/100,cy:.5+valueAt(clip,'y',local)/100};
+  const [u,v] = trackingPoint(area,(event.clientX-rect.left)/rect.width,(event.clientY-rect.top)/rect.height,true);
+  if (u<0 || u>1 || v<0 || v>1) return notify('Click inside the selected clip in Preview.');
+  try {
+    const key = sampledKey(readColorSample(video,u,v),backgroundKey(clip.backgroundKey));
+    stopBackgroundSample();
+    writeBackgroundKey(clip,key);
+    notify(`Background sampled · ${key.color}`);
+  } catch { notify('Could not read this preview frame. Try another frame.'); }
 }
 
 function stopTitlePosition() {
@@ -2955,6 +3070,7 @@ function startTitleDrag(event,title,stage) {
 $('stage').onpointerdown = event => {
   if (event.button!==0 || cancelTitleDrag) return;
   const stage = $('stage');
+  if (samplingKey) { event.preventDefault(); pickBackground(event); return; }
   if (placingText) {
     const {x,y} = previewPoint(event,stage.getBoundingClientRect());
     stopTextPlacement();
@@ -2999,6 +3115,7 @@ $('stage').onpointerdown = event => {
 };
 
 function stopTextPlacement() {
+  stopBackgroundSample();
   stopTitlePosition();
   cancelTitleDrag?.();
   placingText=false;
@@ -3299,6 +3416,8 @@ function refreshTrackControls() {
   if (applyTiming) applyTiming.disabled = Boolean(isProtected);
   const editList = $('inspector').querySelector('[data-edit-text-list]');
   if (editList) editList.disabled = Boolean(isProtected);
+  for (const control of $('inspector').querySelectorAll('[data-key-edit]')) control.disabled = Boolean(isProtected);
+  if (isProtected) stopBackgroundSample();
   if (isProtected) stopTitlePosition();
 }
 
@@ -3370,6 +3489,7 @@ function renderTimeline() {
   $('project').value = project.name;
   $('aspect').value = project.width ? 'custom' : project.aspect;
   $('export-format').value = project.format;
+  $('export-transparent').checked = Boolean(project.transparent);
   $('export-quality').value = project.quality;
   const [width, height] = sequenceSize(project);
   $('stage').style.setProperty('--ratio', width / height);
@@ -3503,7 +3623,9 @@ function updateExportSummary() {
   const choice = $('resolution').value;
   const dimensions = choice==='canvas' ? sequenceSize(project) : canvasSize(choice,project.aspect);
   const range = $('export-use-range').checked ? exportRange(project,duration).frames : duration;
-  $('export-summary').textContent = `${dimensions.join(' × ')} · ${fps} fps · ${timecode(range)} · Stereo`;
+  const webm = $('export-format').value==='webm';
+  $('export-transparency-field').hidden = !webm;
+  $('export-summary').textContent = `${dimensions.join(' × ')} · ${fps} fps · ${timecode(range)} · Stereo${webm && $('export-transparent').checked?' · Transparent':''}`;
 }
 
 function mediaPosition(el, t) {
@@ -3559,6 +3681,7 @@ for (const el of players) {
 function showVideo(item, frame, force) {
   if (!item || !bin.has(item.asset)) {
     if (activeClip) active.pause();
+    clearVideoKey(active);
     activeClip = null;
     active.hidden = true;
     return;
@@ -3567,6 +3690,7 @@ function showVideo(item, frame, force) {
   if (activeClip?.id !== item.id) {
     active.pause();
     if (spare.dataset.asset === item.asset && (active.dataset.asset !== item.asset || activeClip)) {
+      clearVideoKey(active);
       active.hidden = true;
       [active, spare] = [spare, active];
     }
@@ -3715,6 +3839,17 @@ function styleVideoMotion(el,clip,local,sequence=project) {
     el.style.setProperty('--fit-height',`${h*100}cqh`);
   }
   styleMotion(el,clip,local);
+  const key = keyDraft?.id===clip.id ? keyDraft.key : clip.backgroundKey;
+  if (samplingKey===clip.id || !key || (key.mode!=='chroma' && key.mode!=='luma')) clearVideoKey(el);
+  else {
+    el.keyPreview ||= createKeyPreview(el);
+    el.keyPreview.update(key,bin.get(clip.asset),matteClip===clip.id,previewQuality);
+  }
+}
+
+function clearVideoKey(el) {
+  el.keyPreview?.destroy();
+  delete el.keyPreview;
 }
 
 function isLiveComposition(clip) {
@@ -3726,6 +3861,7 @@ function displayCompositionViews(base,frame,seek) {
   if (base) visible.unshift(base);
   for (const [key,view] of compositionViews) {
     if (visible.some(clip=>clip.id===key)) continue;
+    for (const el of view.video.values()) clearVideoKey(el);
     for (const el of [...view.video.values(),...view.audio.values()]) el.pause();
     view.frame.remove();
     compositionViews.delete(key);
@@ -3764,6 +3900,7 @@ function displayVideoLayers(clips,media,container,sequence,frame,seek,parentMix)
   for (const [id, el] of media) {
     if (visible.some(clip => clip.id === id)) continue;
     el.pause();
+    clearVideoKey(el);
     el.remove();
     media.delete(id);
   }
@@ -4653,6 +4790,11 @@ $('close-dialog').onclick = () => $('export-dialog').close();
 $('resolution').onchange = updateExportSummary;
 $('export-use-range').onchange = updateExportSummary;
 $('export-format').onchange = event => change(() => { project.format = event.target.value; });
+$('export-format').addEventListener('change',updateExportSummary);
+$('export-transparent').onchange = () => {
+  change(()=>{ project.transparent = $('export-transparent').checked; });
+  updateExportSummary();
+};
 $('export-quality').onchange = event => change(() => { project.quality = event.target.value; });
 $('export-form').onsubmit = async event => {
   event.preventDefault();
