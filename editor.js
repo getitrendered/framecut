@@ -113,7 +113,8 @@ let auditionNode;
 const audioPlayers = new Map();
 let placingText=false;
 let positioningTitles=false;
-let cancelTitleDrag;
+let cancelPreviewDrag;
+let previewTextClip;
 const previewAnimations=new WeakMap();
 const reduceMotion=matchMedia('(prefers-reduced-motion: reduce)');
 const previewObserver=new IntersectionObserver(entries=>{
@@ -134,6 +135,8 @@ const seconds = frame => frame / fps;
 const frameAt = clientX => Math.round((clientX - space.getBoundingClientRect().left) * fps / zoom);
 const diskURL = (asset, file) => `/media/${asset}/${file}`;
 const audioURL = id => diskURL(id,bin.get(id)?.audioMime==='audio/mpeg'?'audio.mp3':'audio.wav');
+const stillURL = (asset,lut) => diskURL(asset,`still${lut?'-'+lut:''}.png`);
+const stillClip = clip => Boolean(bin.get(clip?.asset)?.still);
 const notify = message => {
   $('status').textContent = message;
   $('task-list').textContent = message;
@@ -273,6 +276,7 @@ function openProject(key) {
   sourceAsset = null;
   $('source-video').removeAttribute('src');
   $('source-video').load();
+  $('source-image').removeAttribute('src');
   $('source-audio').removeAttribute('src');
   $('source-audio').load();
   $('source-info').textContent = 'Select footage to preview it.';
@@ -974,13 +978,15 @@ function moveAsset(assetId, to) {
 function renderSource() {
   const asset = projectAsset(sourceAsset);
   const video = $('source-video');
+  const image = $('source-image');
   const audio = $('source-audio');
   const isAudio = asset?.kind==='audio';
-  video.hidden = !asset || isAudio;
+  video.hidden = !asset || isAudio || asset.still;
+  image.hidden = !asset?.still;
   audio.hidden = !isAudio;
   if (video.hidden) video.pause();
   if (audio.hidden) audio.pause();
-  $('resize-source').hidden = video.hidden;
+  $('resize-source').hidden = video.hidden && image.hidden;
   $('source-folder-field').hidden = !asset;
   if (!asset) {
     $('source-info').textContent = 'Select footage to preview it.';
@@ -990,6 +996,10 @@ function renderSource() {
   if (isAudio) {
     const url = audioURL(asset.id);
     if (audio.getAttribute('src')!==url) audio.src = url;
+  } else if (asset.still) {
+    image.alt = asset.name;
+    const url = stillURL(asset.id);
+    if (image.getAttribute('src')!==url) image.src = url;
   } else {
   const url = programUrl({asset:asset.id},'auto');
   video.poster = diskURL(asset.id,'thumb.jpg');
@@ -1007,7 +1017,7 @@ function renderSource() {
     } else $('source-info').textContent=label+' · Playback failed. Check Tasks for details.';
   };
   }
-  $('source-info').textContent = `${asset.name} · ${timecode(asset.frames)}`;
+  $('source-info').textContent = asset.still ? `${asset.name} · ${asset.width} × ${asset.height}` : `${asset.name} · ${timecode(asset.frames)}`;
   const select = $('source-folder');
   select.replaceChildren();
   for (const [key, name] of [['', 'Unfiled'], ...project.folders.map(item => [item.id, item.name])]) select.add(new Option(name, key));
@@ -1572,9 +1582,6 @@ function refreshSelection() {
   renderTools();
   refreshTrackControls();
   updateButtons();
-  for (const label of $('preview-titles').querySelectorAll('[data-preview-title]')) {
-    label.classList.toggle('canvas-selected',isSelected(label.dataset.previewTitle));
-  }
   if (clearMatte) display(cursor);
 }
 
@@ -1815,7 +1822,7 @@ function splitClip() {
   const offset = cursor - item.start;
   change(() => {
     const right = { ...clip, id: id(), len: clip.len - offset, motion: resizeMotion(clip, offset, clip.len - offset) };
-    if (clip.asset) right.in = clip.in + offset;
+    if (clip.asset && !stillClip(clip)) right.in = clip.in + offset;
     right.start = cursor;
     clip.motion = resizeMotion(clip, 0, offset);
     clip.len = offset;
@@ -1891,7 +1898,8 @@ function renderInspector() {
     panel.append(videoTransformControls(clip,transformOpen));
     const timing = node('div', 'property-line');
     const remaining = laneNeighbors(clip).next - clip.start;
-    timing.append(timeField('Source in (s)', clip.in, Math.max(0, clip.in + clip.len - remaining), clip.in + clip.len - 1, value => {
+    if (asset.still) timing.append(timeField('Duration (s)',clip.len,1,stillDurationLimit(clip),value=>{clip.len=value;}));
+    else timing.append(timeField('Source in (s)', clip.in, Math.max(0, clip.in + clip.len - remaining), clip.in + clip.len - 1, value => {
       const len = clip.len + clip.in - value;
       clip.motion = resizeMotion(clip, value - clip.in, len);
       clip.len = len;
@@ -1914,7 +1922,7 @@ function renderInspector() {
       actions.append(button('Extract audio', () => extractAudio(clip), extracted),
         button(clip.muted ? 'Unmute original audio' : 'Mute original audio', () => change(() => { clip.muted = !clip.muted; })));
     }
-    if (page==='edit' && !asset.alpha && !linked) {
+    if (page==='edit' && !asset.still && !asset.alpha && !linked) {
       actions.append(button('Find closest loop',()=>void findClosestLoop(clip),clip.len<30 || looping));
       if(asset.loop) {
         let minutes=60;
@@ -2612,6 +2620,11 @@ function laneNeighbors(clip) {
   };
 }
 
+function stillDurationLimit(clip) {
+  const end = Math.min(laneNeighbors(clip).next,project.fixedFrames || MAX_DURATION);
+  return Math.max(1,Math.min(MAX_DURATION-clip.in,end-clip.start));
+}
+
 function clipStart(clip) {
   return clip.start ?? timeline.find(item => item.id === clip.id)?.start ?? 0;
 }
@@ -2624,14 +2637,18 @@ function hasTransformEdits(clip) {
 
 function writeMotionValue(clip, key, value, keyframe, framing = false) {
   if (!Number.isFinite(value)) return;
-  const [,min,max] = properties[key];
   const time = keyframe ? clamp(cursor-clipStart(clip),0,clip.len-1) : 0;
   change(() => {
     if (framing && key!=='opacity') clip.fit = videoFit(clip);
-    clip.motion ||= {};
-    const previous = (clip.motion[key] || []).filter(([frame])=>frame!==time);
-    clip.motion[key] = [...previous,[time,clamp(value,min,max)]].sort((a,b)=>a[0]-b[0]);
+    setMotionValue(clip,key,value,time);
   });
+}
+
+function setMotionValue(clip,key,value,time) {
+  const [,min,max] = properties[key];
+  clip.motion ||= {};
+  const previous = (clip.motion[key] || []).filter(([frame])=>frame!==time);
+  clip.motion[key] = [...previous,[time,clamp(value,min,max)]].sort((a,b)=>a[0]-b[0]);
 }
 
 function videoTransformControls(clip, open) {
@@ -3053,7 +3070,7 @@ async function addGraphic(kind, file, settings) {
 
 function fittedMediaSize(clip, el, sequence=project) {
   const asset = bin.get(clip.asset);
-  const ratio = el.readyState && el.videoWidth && el.videoHeight ? el.videoWidth/el.videoHeight :
+  const ratio = el?.videoWidth && el.videoHeight ? el.videoWidth/el.videoHeight :
     (asset?.width || 1920)/(asset?.height || 1080);
   const [width,height] = sequenceSize(sequence);
   const [w,h] = fittedVideoSize(videoFit(clip),ratio,width,height);
@@ -3126,18 +3143,19 @@ function beginBackgroundSample(clip) {
 
 function pickBackground(event) {
   const clip = selection();
-  const video = clip?.track ? overlayPlayers.get(clip.id) : activeClip?.id===clip?.id ? active : null;
-  if (clip?.id!==samplingKey || !video || video.readyState<2 || video.seeking) return notify('Wait for the selected frame to load.');
+  const media = previewElement(clip);
+  const ready = media instanceof HTMLImageElement ? media.naturalWidth>0 : media?.readyState>=2 && !media.seeking;
+  if (clip?.id!==samplingKey || !ready) return notify('Wait for the selected frame to load.');
   const rect = $('stage').getBoundingClientRect();
   const local = cursor-clip.start;
-  const {w,h,aspect} = fittedMediaSize(clip,video);
+  const {w,h,aspect} = fittedMediaSize(clip,media);
   const scale = valueAt(clip,'scale',local)/100;
   const area = {w:w*scale,h:h*scale,aspect,angle:valueAt(clip,'rotation',local),
     cx:.5+valueAt(clip,'x',local)/100,cy:.5+valueAt(clip,'y',local)/100};
   const [u,v] = trackingPoint(area,(event.clientX-rect.left)/rect.width,(event.clientY-rect.top)/rect.height,true);
   if (u<0 || u>1 || v<0 || v>1) return notify('Click inside the selected clip in Preview.');
   try {
-    const key = sampledKey(readColorSample(video,u,v),backgroundKey(clip.backgroundKey));
+    const key = sampledKey(readColorSample(media,u,v),backgroundKey(clip.backgroundKey));
     stopBackgroundSample();
     writeBackgroundKey(clip,key);
     notify(`Background sampled · ${key.color}`);
@@ -3166,49 +3184,166 @@ function beginTitlePosition(titles) {
   notify('Click where you want the selected text on the preview');
 }
 
-function startTitleDrag(event,title,stage) {
+function previewElement(clip) {
+  if (!clip || clip.kind==='audio' || cursor<clip.start || cursor>=clip.start+clip.len) return null;
+  if (!clip.asset) return $('preview-titles').querySelector(`[data-preview-title="${CSS.escape(clip.id)}"]`);
+  if (isLiveComposition(clip)) return compositionViews.get(clip.id)?.frame;
+  if (clip.track) return overlayPlayers.get(clip.id);
+  if (stillClip(clip)) return $('preview-image');
+  return activeClip?.id===clip.id ? active : null;
+}
+
+function previewCoordinates(event,stage=$('stage')) {
+  const {left,top} = stage.getBoundingClientRect();
+  return [event.clientX-left-stage.clientLeft,event.clientY-top-stage.clientTop];
+}
+
+function rotatePoint(x,y,angle) {
+  const radians = angle*Math.PI/180;
+  const sin = Math.sin(radians), cos = Math.cos(radians);
+  return [x*cos-y*sin,x*sin+y*cos];
+}
+
+function previewBounds(clip,el,stage=$('stage')) {
+  if (!el || el.hidden || !stage.clientWidth || !stage.clientHeight) return null;
+  const width = stage.clientWidth, height = stage.clientHeight;
+  const local = cursor-clip.start;
+  const scale = valueAt(clip,'scale',local)/100;
+  const angle = valueAt(clip,'rotation',local);
+  const x = width*(.5+(valueAt(clip,'x',local)+titlePositionOffset(clip,'x'))/100);
+  const y = height*(.5+(valueAt(clip,'y',local)+titlePositionOffset(clip,'y'))/100);
+  if (clip.asset) {
+    const {w,h} = fittedMediaSize(clip,el);
+    return {x,y,w:width*w*scale,h:height*h*scale,angle};
+  }
+  const type = titleType(clip);
+  const align = type.align==='left' ? 0 : type.align==='right' ? 1 : .5;
+  const w = el.offsetWidth, h = el.offsetHeight;
+  const [dx,dy] = rotatePoint((el.offsetLeft+w*(.5-align)-width/2)*scale,
+    (el.offsetTop+h*(.5-titleVerticalAnchor(clip))-height/2)*scale,angle);
+  return {x:x+dx,y:y+dy,w:w*scale,h:h*scale,angle};
+}
+
+function previewTarget(event) {
+  const point = previewCoordinates(event);
+  const titles = [...$('preview-titles').querySelectorAll('[data-preview-title]')].reverse();
+  const overlays = [...project.overlays].reverse().sort((a,b)=>b.track-a.track);
+  const candidates = titles.map(el=>project.titles.find(clip=>clip.id===el.dataset.previewTitle)).concat(overlays,timeline.find(clip=>
+    cursor>=clip.start && cursor<clip.start+clip.len));
+  return candidates.find(clip=>{
+    const box = previewBounds(clip,previewElement(clip));
+    if (!box || valueAt(clip,'opacity',cursor-clip.start)<=0) return false;
+    const [x,y] = rotatePoint(point[0]-box.x,point[1]-box.y,-box.angle);
+    return Math.abs(x)<=box.w/2 && Math.abs(y)<=box.h/2;
+  });
+}
+
+function refreshPreviewTransform(clip=selection()) {
+  const outline = $('preview-transform');
+  const box = !playing && !previewTextClip && !placingText && !positioningTitles && !picking && !samplingKey &&
+    previewBounds(clip,previewElement(clip));
+  outline.hidden = !box;
+  if (!box) return;
+  const stage = $('stage');
+  outline.classList.toggle('locked',protectedTrack(project,trackOf(clip)));
+  outline.classList.toggle('title-transform',!clip.asset);
+  outline.style.left = `${box.x}px`;
+  outline.style.top = `${box.y}px`;
+  outline.style.width = `${box.w}px`;
+  outline.style.height = `${box.h}px`;
+  outline.style.rotate = `${box.angle}deg`;
+  const [rx,ry] = rotatePoint(0,-box.h/2-17,box.angle);
+  outline.classList.toggle('rotation-inset',box.x+rx<8 || box.x+rx>stage.clientWidth-8 ||
+    box.y+ry<8 || box.y+ry>stage.clientHeight-8);
+}
+
+function stylePreviewDraft(clip) {
+  const el = previewElement(clip);
+  if (!el) return;
+  const local = cursor-clip.start;
+  if (!clip.asset) styleMotion(el.parentElement,clip,local);
+  else if (isLiveComposition(clip)) styleComposition(el,clip,local);
+  else styleVideoMotion(el,clip,local);
+}
+
+function startPreviewDrag(event,clip,operation,stage) {
   event.preventDefault();
+  stage.focus({preventScroll:true});
   pause();
-  if (!isSelected(title.id) || event.ctrlKey || event.metaKey) select(title.id,{toggle:event.ctrlKey || event.metaKey});
-  if (!isSelected(title.id)) return;
-  const titles = selectedTitles();
-  if (titles.some(clip=>protectedTrack(project,trackOf(clip)))) return;
-  const rect = stage.getBoundingClientRect();
-  const initial = previewPoint(event,rect);
-  const start = new Map(titles.map(clip=>[clip.id,{x:titlePosition(clip,'x'),y:titlePosition(clip,'y')} ]));
-  const visible = [...$('preview-titles').querySelectorAll('[data-preview-title]')]
-    .map(label=>({label,clip:titles.find(clip=>clip.id===label.dataset.previewTitle)})).filter(item=>item.clip);
+  const toggle = event.ctrlKey || event.metaKey;
+  if (operation==='move' && (!isSelected(clip.id) || toggle || selection()?.id!==clip.id)) {
+    select(clip.id,{toggle,preserve:!toggle && isSelected(clip.id)});
+  }
+  if (toggle || !isSelected(clip.id)) return;
+  const group = operation==='move' && !clip.asset ? selectedTitles() : [clip];
+  if (group.some(item=>protectedTrack(project,trackOf(item)))) return;
+  const box = previewBounds(clip,previewElement(clip),stage);
+  if (!box) return;
+  const [startX,startY] = previewCoordinates(event,stage);
+  const initial = [startX-box.x,startY-box.y];
+  const initialLocal = rotatePoint(...initial,-box.angle);
+  const local = cursor-clip.start;
+  const initialScale = valueAt(clip,'scale',local);
   const listeners = new AbortController();
   const options = {signal:listeners.signal};
-  let moved = false;
-  let delta;
+  let drafts;
   const update = move=>{
     if (move.pointerId!==event.pointerId) return;
-    if (!moved && Math.hypot(move.clientX-event.clientX,move.clientY-event.clientY)<3) return;
-    moved=true;
-    const point = previewPoint(move,rect);
-    delta = {x:point.x-initial.x,y:point.y-initial.y};
-    for (const {label,clip} of visible) {
-      const at = start.get(clip.id);
-      const position = {x:offsetForTitlePosition(clip,'x',at.x+delta.x),y:offsetForTitlePosition(clip,'y',at.y+delta.y)};
-      styleMotion(label.parentElement,{...clip,position},cursor-clip.start);
-    }
+    const [x,y] = previewCoordinates(move,stage);
+    const dx = x-startX, dy = y-startY;
+    if (!drafts && Math.hypot(dx,dy)<3) return;
+    drafts = group.map(item=>{
+      const draft = {...item,motion:{...item.motion}};
+      if (!item.asset) draft.position = {...item.position};
+      const set = (key,value)=>{
+        const keys = points(item,key);
+        const at = page==='animation' || keys.length>1 ? cursor-item.start : keys[0][0];
+        setMotionValue(draft,key,value,clamp(at,0,item.len-1));
+      };
+      if (draft.asset) draft.fit = videoFit(draft);
+      if (operation==='move') {
+        const tx = dx/stage.clientWidth*100, ty = dy/stage.clientHeight*100;
+        if (draft.asset) {
+          set('x',valueAt(item,'x',local)+tx);
+          set('y',valueAt(item,'y',local)+ty);
+        } else {
+          setTitlePosition(draft,'x',titlePosition(item,'x')+tx);
+          setTitlePosition(draft,'y',titlePosition(item,'y')+ty);
+        }
+      } else if (operation==='scale') {
+        const factor = ((x-box.x)*initial[0]+(y-box.y)*initial[1])/Math.max(1,initial[0]**2+initial[1]**2);
+        set('scale',initialScale*factor);
+      } else if (operation==='rotate') {
+        const angle = (Math.atan2(y-box.y,x-box.x)-Math.atan2(initial[1],initial[0]))*180/Math.PI;
+        set('rotation',box.angle+((angle+540)%360)-180);
+      } else {
+        const axis = operation==='stretch-x' ? 0 : 1;
+        const size = axis===0 ? 'stretchWidth' : 'stretchHeight';
+        const point = rotatePoint(x-box.x,y-box.y,-box.angle);
+        draft[size] = videoStretch(videoStretch(item[size])*point[axis]/(initialLocal[axis] || 1));
+      }
+      if (!draft.asset && operation!=='move') {
+        const next = previewBounds(draft,previewElement(item),stage);
+        draft.position.x = titlePositionOffset(item,'x')+(box.x-next.x)/stage.clientWidth*100;
+        draft.position.y = titlePositionOffset(item,'y')+(box.y-next.y)/stage.clientHeight*100;
+      }
+      stylePreviewDraft(draft);
+      return draft;
+    });
+    refreshPreviewTransform(drafts.find(item=>item.id===clip.id));
   };
   const finish = cancelled=>{
     listeners.abort();
-    cancelTitleDrag = null;
-    stage.classList.remove('dragging-title');
+    cancelPreviewDrag = null;
+    stage.classList.remove('dragging-preview');
     if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
-    if (!cancelled && moved) editTitles(titles,clip=>{
-      const at = start.get(clip.id);
-      setTitlePosition(clip,'x',at.x+delta.x);
-      setTitlePosition(clip,'y',at.y+delta.y);
-    });
-    else if (moved) display(cursor);
+    if (!drafts) return;
+    if (cancelled) display(cursor);
+    else change(()=>group.forEach((item,index)=>Object.assign(item,drafts[index])));
   };
-  cancelTitleDrag = ()=>finish(true);
+  cancelPreviewDrag = ()=>finish(true);
   stage.setPointerCapture(event.pointerId);
-  stage.classList.add('dragging-title');
+  stage.classList.toggle('dragging-preview',operation==='move');
   stage.addEventListener('pointermove',update,options);
   stage.addEventListener('pointerup',end=>{
     if (end.pointerId!==event.pointerId) return;
@@ -3218,8 +3353,59 @@ function startTitleDrag(event,title,stage) {
   stage.addEventListener('lostpointercapture',end=>{ if (end.pointerId===event.pointerId) finish(true); },options);
 }
 
+const previewText = $('preview-text-edit');
+
+function openPreviewText(clip) {
+  if (!clip || clip.asset || !guardTrack(trackOf(clip))) return;
+  pause();
+  select(clip.id);
+  const stage = $('stage');
+  const label = previewElement(clip);
+  const box = previewBounds(clip,label);
+  if (!box) return;
+  const style = getComputedStyle(label);
+  const width = Math.min(stage.clientWidth-8,Math.max(box.w+16,96));
+  const height = Math.min(stage.clientHeight-8,Math.max(box.h+12,44));
+  previewText.style.left = `${clamp(box.x-width/2,4,stage.clientWidth-width-4)}px`;
+  previewText.style.top = `${clamp(box.y-height/2,4,stage.clientHeight-height-4)}px`;
+  previewText.style.width = `${width}px`;
+  previewText.style.height = `${height}px`;
+  previewText.style.font = style.font;
+  previewText.style.fontSize = `${parseFloat(style.fontSize)*valueAt(clip,'scale',cursor-clip.start)/100}px`;
+  previewText.style.textAlign = style.textAlign;
+  previewText.value = clip.text;
+  previewTextClip = clip;
+  previewText.hidden = false;
+  label.style.visibility = 'hidden';
+  refreshPreviewTransform();
+  previewText.focus({preventScroll:true});
+  previewText.select();
+}
+
+function closePreviewText(save) {
+  if (!previewTextClip) return;
+  const clip = previewTextClip;
+  const text = cleanText(previewText.value);
+  previewTextClip = null;
+  previewText.hidden = true;
+  if (save && text && text!==clip.text && project.titles.includes(clip)) editTitles([clip],item=>{item.text=text;});
+  display(cursor);
+}
+
+previewText.onblur = ()=>closePreviewText(true);
+previewText.onkeydown = event=>{
+  if (event.key!=='Escape' && !(event.key==='Enter' && (event.ctrlKey || event.metaKey))) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closePreviewText(event.key==='Enter');
+  $('stage').focus({preventScroll:true});
+};
+
+new ResizeObserver(()=>refreshPreviewTransform()).observe($('stage'));
+
 $('stage').onpointerdown = event => {
-  if (event.button!==0 || cancelTitleDrag) return;
+  if (event.button!==0 || cancelPreviewDrag || event.target===previewText) return;
+  closePreviewText(true);
   const stage = $('stage');
   if (samplingKey) { event.preventDefault(); pickBackground(event); return; }
   if (placingText) {
@@ -3235,8 +3421,13 @@ $('stage').onpointerdown = event => {
     editTitles(titles,clip=>{ setTitlePosition(clip,'x',x); setTitlePosition(clip,'y',y); });
     return;
   }
-  const title = dropTitleTarget(event);
-  if (!picking && title) return startTitleDrag(event,title,stage);
+  if (!picking) {
+    const handle = event.target.closest('[data-handle]')?.dataset.handle;
+    const target = handle ? selection() : previewTarget(event);
+    if (target) startPreviewDrag(event,target,handle || 'move',stage);
+    else if (!event.ctrlKey && !event.metaKey) select(null);
+    return;
+  }
   const clip = selection();
   if (!picking || !clip || clip.id !== trackingSource) return;
   const rect = stage.getBoundingClientRect();
@@ -3265,13 +3456,26 @@ $('stage').onpointerdown = event => {
   };
 };
 
+$('stage').ondblclick = event=>{
+  if (!placingText && !positioningTitles && !picking && !samplingKey &&
+      event.target!==previewText && !event.target.closest('[data-handle]')) openPreviewText(previewTarget(event));
+};
+$('stage').onkeydown = event=>{
+  if (event.key==='Enter' && event.target===$('stage') && !placingText && !picking && !samplingKey) {
+    event.preventDefault();
+    openPreviewText(selection());
+  }
+};
+
 function stopTextPlacement() {
   stopBackgroundSample();
   stopTitlePosition();
-  cancelTitleDrag?.();
+  cancelPreviewDrag?.();
+  closePreviewText(false);
   placingText=false;
   $('stage').classList.remove('placing-text');
   $('place-text').setAttribute('aria-pressed','false');
+  refreshPreviewTransform();
 }
 
 $('place-text').onclick=()=>{
@@ -3541,6 +3745,7 @@ function refreshTrackControls() {
   }
   selectTrack(selectedTrack);
   refreshCanvasAlignment();
+  refreshPreviewTransform();
   const clip = selection();
   const isProtected = clip && protectedTrack(project,trackOf(clip));
   const batch = $('inspector').querySelector('[data-title-batch]');
@@ -3854,7 +4059,7 @@ function showVideo(item, frame, force) {
   }
   active.hidden = false;
   const next = timeline[timeline.indexOf(item) + 1];
-  if (next && !isLiveComposition(next) && bin.has(next.asset) &&
+  if (next && !isLiveComposition(next) && !stillClip(next) && bin.has(next.asset) &&
       (spare.dataset.asset !== next.asset || spare.preloadClip !== next.id)) {
     spare.preloadClip = next.id;
     setSource(spare, next, next.start);
@@ -3864,12 +4069,18 @@ function showVideo(item, frame, force) {
 function display(frame, seek = false) {
   const item = timeline.find(item => frame >= item.start && frame < item.start + item.len);
   const linked = isLiveComposition(item);
-  showVideo(linked ? null : item, frame, seek);
-  if (item && !linked) { styleVideoMotion(active, item, frame - item.start); setAudioLevel(active,item); }
+  const still = stillClip(item);
+  const image = $('preview-image');
+  showVideo(linked || still ? null : item, frame, seek);
+  image.hidden = !still;
+  if (still) showImage(image,item,frame-item.start);
+  else clearVideoKey(image);
+  if (item && !linked && !still && activeClip) { styleVideoMotion(active,item,frame-item.start); setAudioLevel(active,item); }
   displayCompositionViews(linked ? item : null,frame,seek);
   displayVideoLayers(project.overlays,overlayPlayers,$('preview-overlays'),project,frame,seek);
   displaySounds(frame,seek);
   displayTitles(project,captionOrder,$('stage'),$('preview-titles'),frame);
+  refreshPreviewTransform();
   $('preview-empty').hidden = duration > 0;
   $('playhead').style.left = `${pixels(frame)}px`;
   $('timecode').textContent = timecode(frame);
@@ -3893,9 +4104,9 @@ function displayTitles(sequence,captions,stage,container,frame) {
     const layer = node('div','program-title-layer');
     const label = node('div', 'preview-title');
     label.dataset.previewTitle=title.id;
-    if (sequence===project && isSelected(title.id)) label.classList.add('canvas-selected');
     const offset = frame - title.start;
     styleTitle(label,title,offset,stage);
+    if (sequence===project && previewTextClip===title) label.style.visibility = 'hidden';
     layer.append(label);
     styleMotion(layer, title, offset);
     titleNodes.push(layer);
@@ -4003,6 +4214,12 @@ function clearVideoKey(el) {
   delete el.keyPreview;
 }
 
+function showImage(el,clip,local,sequence=project) {
+  const url = stillURL(clip.asset,clip.lut);
+  if (el.getAttribute('src')!==url) el.src = url;
+  styleVideoMotion(el,clip,local,sequence);
+}
+
 function isLiveComposition(clip) {
   return Boolean(clip?.composition && clip.asset===compositionAssetKey(clip.composition));
 }
@@ -4013,7 +4230,7 @@ function displayCompositionViews(base,frame,seek) {
   for (const [key,view] of compositionViews) {
     if (visible.some(clip=>clip.id===key)) continue;
     for (const el of view.video.values()) clearVideoKey(el);
-    for (const el of [...view.video.values(),...view.audio.values()]) el.pause();
+    for (const el of [...view.video.values(),...view.audio.values()]) el.pause?.();
     view.frame.remove();
     compositionViews.delete(key);
   }
@@ -4032,12 +4249,9 @@ function displayCompositionViews(base,frame,seek) {
       view = { frame,stage,titles,video:new Map(),audio:new Map(),captions:sequence.titles.filter(title=>title.style==='caption').sort((a,b)=>a.start-b.start) };
       compositionViews.set(clip.id,view);
     }
-    const {w,h} = fittedMediaSize(clip,view.frame);
-    view.frame.style.width = `${w*100}%`;
-    view.frame.style.height = `${h*100}%`;
     view.frame.style.zIndex = clip.track || 0;
     const local = frame-clip.start;
-    styleMotion(view.frame,clip,local);
+    styleComposition(view.frame,clip,local);
     const position = clip.in+local;
     const mix = clipMix(project,clip);
     displayVideoLayers([...sequence.clips,...sequence.overlays],view.video,view.stage,sequence,position,seek,mix);
@@ -4046,11 +4260,18 @@ function displayCompositionViews(base,frame,seek) {
   }
 }
 
+function styleComposition(el,clip,local) {
+  const {w,h} = fittedMediaSize(clip,el);
+  el.style.width = `${w*100}%`;
+  el.style.height = `${h*100}%`;
+  styleMotion(el,clip,local);
+}
+
 function displayVideoLayers(clips,media,container,sequence,frame,seek,parentMix) {
   const visible = clips.filter(clip => !isLiveComposition(clip) && bin.has(clip.asset) && frame >= clip.start && frame < clip.start + clip.len);
   for (const [id, el] of media) {
-    if (visible.some(clip => clip.id === id)) continue;
-    el.pause();
+    if (visible.some(clip => clip.id===id && stillClip(clip)===(el instanceof HTMLImageElement))) continue;
+    el.pause?.();
     clearVideoKey(el);
     el.remove();
     media.delete(id);
@@ -4058,6 +4279,18 @@ function displayVideoLayers(clips,media,container,sequence,frame,seek,parentMix)
   for (const clip of visible) {
     let el = media.get(clip.id);
     const fresh = !el;
+    if (stillClip(clip)) {
+      if (fresh) {
+        el = node('img','preview-image');
+        el.alt = '';
+        el.draggable = false;
+        container.append(el);
+        media.set(clip.id,el);
+      }
+      el.style.zIndex = clip.track || 0;
+      showImage(el,clip,frame-clip.start,sequence);
+      continue;
+    }
     if (fresh) {
       el = node('video');
       el.playsInline = true;
@@ -4083,8 +4316,8 @@ function displayVideoLayers(clips,media,container,sequence,frame,seek,parentMix)
 function pause() {
   playing = false;
   cancelAnimationFrame(raf);
-  for (const el of [...players, ...overlayPlayers.values(), ...audioPlayers.values()]) el.pause();
-  for (const view of compositionViews.values()) for (const el of [...view.video.values(), ...view.audio.values()]) el.pause();
+  for (const el of [...players, ...overlayPlayers.values(), ...audioPlayers.values()]) el.pause?.();
+  for (const view of compositionViews.values()) for (const el of [...view.video.values(), ...view.audio.values()]) el.pause?.();
   $('play').textContent = '▶';
   $('play').setAttribute('aria-label', 'Play');
 }
@@ -4130,10 +4363,12 @@ function togglePlay() {
   if (!duration) return;
   if (playing) {
     pause();
+    refreshPreviewTransform();
     return;
   }
   if (cursor >= duration - 1) setPosition(0);
   playing = true;
+  refreshPreviewTransform();
   blackSince = performance.now();
   blackFrame = cursor;
   $('play').textContent = 'Ⅱ';
@@ -4238,7 +4473,7 @@ function dragClip(event) {
     const snapped=snapPoint(desired,len,item.id,event.shiftKey);
     start=fitClip(peers,snapped,len,item.id);
     if(type==='video') drag.videoTrack=target;
-  } else if (video) {
+  } else if (video && !stillClip(item)) {
     const limits = laneNeighbors(item);
     if (trim === 'left') {
       const edge=snapPoint(item.start+delta,0,item.id,event.shiftKey);
@@ -4252,10 +4487,12 @@ function dragClip(event) {
   } else {
     const limits = laneNeighbors(item);
     if (trim === 'left') {
-      start = clamp(snapPoint(item.start+delta,0,item.id,event.shiftKey), limits.previous, item.start + item.len - 1);
+      const earliest = stillClip(item) ? Math.max(limits.previous,item.start+item.len+item.in-MAX_DURATION) : limits.previous;
+      start = clamp(snapPoint(item.start+delta,0,item.id,event.shiftKey), earliest, item.start + item.len - 1);
       len = item.len + item.start - start;
     } else {
-      len = clamp(snapPoint(item.start+item.len+delta,0,item.id,event.shiftKey)-start, 1, limits.next - start);
+      const limit = stillClip(item) ? stillDurationLimit(item) : limits.next - start;
+      len = clamp(snapPoint(item.start+item.len+delta,0,item.id,event.shiftKey)-start, 1, limit);
     }
   }
   drag.changes = video ? { in: source, len } : { start, len };
@@ -4282,7 +4519,7 @@ function endClipDrag(cancel = false) {
   if (changes) {
     change(() => {
       const clip = selection();
-      if (trim === 'left') clip.motion = resizeMotion(clip, clip.asset ? changes.in - clip.in : changes.start - clip.start, changes.len);
+      if (trim === 'left') clip.motion = resizeMotion(clip, clip.asset && !stillClip(clip) ? changes.in - clip.in : changes.start - clip.start, changes.len);
       if(videoTrack!==undefined && videoTrack!==(clip.track||0)){
         const previous=clipList(clip);
         previous.splice(previous.indexOf(clip),1);
@@ -4826,7 +5063,7 @@ $('preview-quality').onchange = async event => {
     if (!isLiveComposition(clip)) return [clip];
     const sequence=entry.compositions.find(item=>item.id===clip.composition)?.sequence;
     return sequence ? at([...sequence.clips,...sequence.overlays],clip.in+cursor-clip.start) : [];
-  }).filter(clip=>bin.has(clip.asset) && !isLiveComposition(clip));
+  }).filter(clip=>bin.has(clip.asset) && !isLiveComposition(clip) && !stillClip(clip));
   if(quality!==previewQuality && visible.length) notify(`Preparing ${quality} preview…`);
   try {
     await Promise.all(visible.map(async clip=>{
@@ -4878,7 +5115,10 @@ document.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase()==='s' &&
       page!=='projects' && !document.querySelector('dialog[open]')) {
     event.preventDefault();
-    if (!event.repeat) saveProject();
+    if (!event.repeat) {
+      closePreviewText(true);
+      saveProject();
+    }
     return;
   }
   if (page==='projects' || page==='led' || event.defaultPrevented || event.target.isContentEditable ||

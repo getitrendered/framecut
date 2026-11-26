@@ -9,7 +9,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { expression, hasVideoFraming, points, properties, titlePositionOffset, valueAt, videoFit, videoStretch } from './motion.mjs';
-import { exportRange, exportWindow, sequenceDuration, sequenceSize } from './sequences.mjs';
+import { exportRange, exportWindow, MAX_DURATION, sequenceDuration, sequenceSize } from './sequences.mjs';
 import { graphics, graphicSize, particlePresets, particleSettings, readMesh, trackPatch } from './graphics.mjs';
 import { extrusionOffsets, textCharacters, textFragment, titleType, titleVerticalAnchor, typewriterDuration, typewriterSteps, typographyText, usesTextReveal, wrapText } from './text.mjs';
 import { installedFontNames, stageTitleFont } from './fonts.mjs';
@@ -56,6 +56,7 @@ await mkdir(join(data, 'renders'), { recursive: true });
 for (const id of await readdir(assetRoot)) {
   try {
     const asset = JSON.parse(await readFile(join(assetRoot, id, 'info.json'), 'utf8'));
+    if (asset.video !== undefined && stillImage.test(asset.name)) asset.still = true;
     assets.set(id, asset);
   } catch {
     // Incomplete imports are excluded from the media library.
@@ -255,10 +256,11 @@ function importMedia(name, transfer) {
     if(!still) return transfer(path);
     const original=path+'.image';
     await transfer(original);
-    await runTimed(['-nostdin','-v','error','-i',original,'-an','-vf','scale=trunc(iw/2)*2:trunc(ih/2)*2,loop=loop=149:size=1:start=0,setpts=N/(30*TB)',
-      '-frames:v','150','-r','30','-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-f','mp4',path],{},'Preparing still image',5);
+    taskStage('Preparing still image');
+    await run(ffmpeg,['-nostdin','-v','error','-i',original,'-map','0:v:0','-frames:v','1',
+      '-c:v','png','-pix_fmt','rgba','-f','image2','-update','1',path]);
     await rm(original);
-  }, { registerEarly: !still }));
+  }, { registerEarly:true, still }));
 }
 
 async function addAudio(name, prepare, audioMime) {
@@ -340,7 +342,7 @@ async function ingest(id, name, writeSource, options={}) {
   importingFolders.add(id);
   try {
     await writeSource(join(folder, 'source'));
-    return await inspectImportedMedia(id,name,options.registerEarly,options.composition);
+    return await inspectImportedMedia(id,name,options.registerEarly,options.composition,options.still);
   } catch (error) {
     await rm(folder, { recursive: true, force: true });
     throw error;
@@ -370,7 +372,7 @@ function videoDuration(video, format) {
   return Number(format?.duration);
 }
 
-async function inspectImportedMedia(id,name,registerEarly,composition) {
+async function inspectImportedMedia(id,name,registerEarly,composition,still) {
   const folder=join(assetRoot,id);
   taskStage('Reading video information');
   const probe=JSON.parse(await run(ffprobe,['-v','error','-show_streams','-show_format','-of','json','source'],{cwd:folder}));
@@ -385,7 +387,7 @@ async function inspectImportedMedia(id,name,registerEarly,composition) {
   const duration=videoDuration(video,probe.format);
   const alpha=video.tags?.alpha_mode==='1' || /^(argb|rgba|abgr|bgra|yuva|gbrap)/.test(video.pix_fmt || '');
   const nativeMime=nativePlayback(composition ? 'composition.mp4' : name,probe.format?.format_name || '',video,audio,alpha);
-  let frames=Math.round(duration*fps);
+  let frames=still ? 5*fps : Math.round(duration*fps);
   const needsPreview=!registerEarly || !Number.isSafeInteger(frames) || frames<1;
   let thumbInput='source', thumbTrack=video.index;
   if(needsPreview){
@@ -407,6 +409,7 @@ async function inspectImportedMedia(id,name,registerEarly,composition) {
     nativeMime:needsPreview?null:nativeMime,video:video.index,audio:audio?.index??null,
     matrix:video.color_space,fullRange:video.color_range==='pc',codec:video.codec_name};
   if (composition) asset.composition = true;
+  if (still) asset.still = true;
   await writeFile(join(folder,'info.partial'),JSON.stringify(asset));
   await rename(join(folder,'info.partial'),join(folder,'info.json'));
   assets.set(id,asset);
@@ -435,6 +438,24 @@ async function importLut(req) {
   await writeFile(join(lutRoot,`${id}.json`), JSON.stringify(lut));
   luts.set(id,lut);
   return lut;
+}
+
+async function stillPreview(asset,lut) {
+  const folder = join(assetRoot,asset.id);
+  const source = join(folder,'source');
+  if (asset.codec==='png' && !lut) return source;
+  const file = join(folder,lut ? `still-${lut}.png` : 'still.png');
+  if (await stat(file).catch(()=>null)) return file;
+  if (!previews.has(file)) {
+    const temp = file+'.partial.png';
+    const filters = lut ? ['-vf',`format=rgba,lut3d=file=../../luts/${lut}.cube`] : [];
+    const task = run(ffmpeg,['-y','-nostdin','-v','error','-i','source','-map',`0:${asset.video}`,'-frames:v','1',
+      ...filters,'-c:v','png','-pix_fmt','rgba','-update','1',temp],{cwd:folder})
+      .then(()=>rename(temp,file)).finally(()=>previews.delete(file));
+    previews.set(file,task);
+  }
+  await previews.get(file);
+  return file;
 }
 
 async function proxy(asset, quality, lut) {
@@ -531,7 +552,8 @@ function frame(value) {
 
 function sourceClip(clip) {
   const asset = assets.get(clip.asset);
-  if (!asset || !frame(clip.in) || !frame(clip.len) || !clip.len || clip.in + clip.len > asset.frames) {
+  const limit = asset?.still && clip.kind!=='audio' ? MAX_DURATION : asset?.frames;
+  if (!asset || !frame(clip.in) || !frame(clip.len) || !clip.len || clip.in + clip.len > limit) {
     throw new Error('A video clip has an invalid source or trim.');
   }
   return { ...clip, asset };
@@ -800,7 +822,8 @@ function alphaDecoder(asset) {
 
 function addRenderInput(args, clip, batch) {
   if (batch) args.push('-threads','1');
-  args.push('-ss',(clip.in/fps).toFixed(6),...alphaDecoder(clip.asset),'-i',`../../media/${clip.asset.id}/source`);
+  if (!clip.asset.still) args.push('-ss',(clip.in/fps).toFixed(6));
+  args.push(...alphaDecoder(clip.asset),'-i',`../../media/${clip.asset.id}/source`);
 }
 
 async function withRenderSections(folder, sections, ext, prepare, merge) {
@@ -1252,6 +1275,11 @@ const server = createServer(async (req, res) => {
       const sound=/^\/media\/([a-f\d-]+)\/audio\.(?:wav|mp3)$/.exec(path);
       const soundAsset = sound && assets.get(sound[1]);
       if(soundAsset && soundAsset.audio !== null) return await serveFile(req,res,await audioPreview(soundAsset),soundAsset.audioMime || 'audio/wav');
+      const still = /^\/media\/([a-f\d-]+)\/still(?:-([a-f\d-]+))?\.png$/.exec(path);
+      const stillAsset = still && assets.get(still[1]);
+      if (stillAsset?.still && (!still[2] || luts.has(still[2]))) {
+        return await serveFile(req,res,await stillPreview(stillAsset,still[2]),'image/png');
+      }
       const program = /^\/media\/([a-f\d-]+)\/p-(auto|full|half|quarter|low)(?:-([a-f\d-]+))?\.(mp4|webm)$/.exec(path);
       if (program && assets.has(program[1]) && (!program[3] || luts.has(program[3]))) {
         const asset=assets.get(program[1]);

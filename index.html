@@ -79,19 +79,32 @@
       </aside>
       <aside class="panel source" aria-label="Source preview">
         <div class="panel-head"><h2>Source preview</h2></div>
-        <div class="source-body"><video id="source-video" controls preload="metadata" hidden></video><audio id="source-audio" controls preload="metadata" hidden></audio><div id="resize-source" class="pane-grip row-grip" role="separator" aria-label="Resize source preview" aria-orientation="horizontal" tabindex="0" hidden></div><p id="source-info" class="subtle">Select footage to preview it.</p><label id="source-folder-field" class="property" hidden><span>Move footage to</span><select id="source-folder"></select></label><div id="source-actions" class="inline-actions"></div></div>
+        <div class="source-body"><video id="source-video" controls preload="metadata" hidden></video><img id="source-image" alt="" hidden><audio id="source-audio" controls preload="metadata" hidden></audio><div id="resize-source" class="pane-grip row-grip" role="separator" aria-label="Resize source preview" aria-orientation="horizontal" tabindex="0" hidden></div><p id="source-info" class="subtle">Select footage to preview it.</p><label id="source-folder-field" class="property" hidden><span>Move footage to</span><select id="source-folder"></select></label><div id="source-actions" class="inline-actions"></div></div>
       </aside>
       <section class="panel viewer" aria-label="Program monitor">
         <div class="panel-head"><h2>Preview</h2><select id="preview-quality" aria-label="Preview quality"><option value="auto" selected>Auto</option><option value="full">Full</option><option value="half">Half</option><option value="quarter">Quarter</option><option value="low">Low</option></select></div>
         <div class="stage-area">
-          <div id="stage" class="stage">
+          <div id="stage" class="stage" tabindex="0" aria-label="Video preview">
             <video id="video" preload="auto" playsinline></video>
             <video id="next-video" preload="auto" playsinline hidden></video>
+            <img id="preview-image" class="preview-image" alt="" draggable="false" hidden>
             <div id="preview-overlays"></div>
             <div id="preview-titles"></div>
             <div id="preview-margins" aria-hidden="true" hidden></div>
             <div id="tracking-box" hidden></div>
             <div id="preview-empty" class="preview-empty"><span aria-hidden="true">▱</span>Add a video or title to preview your edit</div>
+            <div id="preview-transform" hidden>
+              <span data-handle="scale" class="handle-nw" title="Scale proportionally"></span>
+              <span data-handle="scale" class="handle-ne" title="Scale proportionally"></span>
+              <span data-handle="scale" class="handle-se" title="Scale proportionally"></span>
+              <span data-handle="scale" class="handle-sw" title="Scale proportionally"></span>
+              <span data-handle="stretch-x" class="handle-w" title="Stretch width"></span>
+              <span data-handle="stretch-x" class="handle-e" title="Stretch width"></span>
+              <span data-handle="stretch-y" class="handle-n" title="Stretch height"></span>
+              <span data-handle="stretch-y" class="handle-s" title="Stretch height"></span>
+              <span data-handle="rotate" class="handle-rotate" title="Rotate"></span>
+            </div>
+            <textarea id="preview-text-edit" aria-label="Edit text in preview" maxlength="900" spellcheck="false" hidden></textarea>
           </div>
         </div>
         <div class="transport">

@@ -32,6 +32,9 @@ void main() {
   gl_FragColor = matte > .5 ? vec4(vec3(a),1.0) : vec4(color,a);
 }`;
 
+const mediaWidth = media => media.videoWidth || media.naturalWidth;
+const mediaHeight = media => media.videoHeight || media.naturalHeight;
+
 function graphics(canvas) {
   const gl = canvas.getContext('webgl',{alpha:true,premultipliedAlpha:false,antialias:false});
   if (!gl) return null;
@@ -62,7 +65,7 @@ function graphics(canvas) {
     gl.viewport(0,0,canvas.width,canvas.height);
     gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
     gl.uniform2fv(uniforms.keyUV,params.uv);
-    gl.uniform2f(uniforms.pixel,1/video.videoWidth,1/video.videoHeight);
+    gl.uniform2f(uniforms.pixel,1/mediaWidth(video),1/mediaHeight(video));
     gl.uniform3fv(uniforms.matrix,params.matrix);
     for (const [name,value] of Object.entries({chromaRange:params.range,cutoff:params.cutoff,softness:key.softness,
       spill:key.spill,channel:params.spill,luma:Number(key.mode==='luma'),matte:Number(matte)})) gl.uniform1f(uniforms[name],value);
@@ -115,12 +118,13 @@ export function createKeyPreview(video) {
   video.after(canvas);
   let current, frameCallback, lastTime;
   function paint() {
-    if (!current || video.readyState<2 || video.seeking || !video.videoWidth) return;
+    if (!current || video.readyState<2 || video.seeking || !mediaWidth(video)) return;
     const { key,params,matte,quality } = current;
     const maxHeight = accelerated ? ({full:1080,half:540,quarter:360,low:240}[quality] || 720) : 270;
-    const ratio = Math.min(1,maxHeight/video.videoHeight,maxHeight*2/video.videoWidth);
-    const width = Math.max(1,Math.round(video.videoWidth*ratio));
-    const height = Math.max(1,Math.round(video.videoHeight*ratio));
+    const sourceWidth = mediaWidth(video), sourceHeight = mediaHeight(video);
+    const ratio = Math.min(1,maxHeight/sourceHeight,maxHeight*2/sourceWidth);
+    const width = Math.max(1,Math.round(sourceWidth*ratio));
+    const height = Math.max(1,Math.round(sourceHeight*ratio));
     if (canvas.width!==width) canvas.width=width;
     if (canvas.height!==height) canvas.height=height;
     try {
@@ -136,6 +140,7 @@ export function createKeyPreview(video) {
   const ready = ()=>paint();
   video.addEventListener('loadeddata',ready);
   video.addEventListener('seeked',ready);
+  video.addEventListener('load',ready);
   function schedule() {
     if (frameCallback!==undefined || !video.requestVideoFrameCallback) return;
     frameCallback = video.requestVideoFrameCallback(()=>{
@@ -160,6 +165,7 @@ export function createKeyPreview(video) {
       current = null;
       video.removeEventListener('loadeddata',ready);
       video.removeEventListener('seeked',ready);
+      video.removeEventListener('load',ready);
       video.classList.remove('key-preview-source');
       canvas.remove();
       draw.dispose?.();
@@ -169,11 +175,12 @@ export function createKeyPreview(video) {
 
 export function readColorSample(video,u,v) {
   const canvas = document.createElement('canvas');
-  const size = Math.min(9,video.videoWidth,video.videoHeight);
+  const width = mediaWidth(video), height = mediaHeight(video);
+  const size = Math.min(9,width,height);
   canvas.width=canvas.height=size;
   const context = canvas.getContext('2d');
-  const left = Math.max(0,Math.min(video.videoWidth-size,Math.round(u*video.videoWidth-size/2)));
-  const top = Math.max(0,Math.min(video.videoHeight-size,Math.round(v*video.videoHeight-size/2)));
+  const left = Math.max(0,Math.min(width-size,Math.round(u*width-size/2)));
+  const top = Math.max(0,Math.min(height-size,Math.round(v*height-size/2)));
   context.drawImage(video,left,top,size,size,0,0,size,size);
   return context.getImageData(0,0,size,size).data;
 }

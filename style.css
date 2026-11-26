@@ -62,7 +62,7 @@ main { min-height:calc(100vh - 60px); padding:12px; display:flex; flex-direction
 .asset button:hover { background:#40535c; }
 .stage-area { flex:1; min-height:0; display:grid; place-items:center; padding:15px; background:radial-gradient(ellipse at 50% 0%,#212a31,#12161a 65%); container-type:size; }
 .stage { width:min(100cqw, calc(100cqh * var(--ratio, 1.77777778))); aspect-ratio:var(--ratio, 1.77777778); position:relative; overflow:hidden; background:#090c0e; border:1px solid #343e46; box-shadow:0 12px 35px #0006; container-type:size; }
-.stage video { display:block; width:100%; height:100%; object-fit:contain; }
+.stage :is(video,.preview-image) { display:block; width:100%; height:100%; object-fit:contain; }
 .preview-empty { display:flex; align-items:center; justify-content:center; flex-direction:column; gap:6px; position:absolute; inset:0; font-size:12px; color:#8999a3; }
 .preview-empty span { font-size:43px; color:#697d8a; line-height:1; }
 .preview-title { position:absolute; left:50%; top:50%; translate:-50% -50%; white-space:nowrap; font-weight:700; color:white; line-height:1; text-shadow:0 1px 2px #000,1px 0 1px #000,-1px 0 1px #000; pointer-events:none; }
