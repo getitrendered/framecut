@@ -11,6 +11,7 @@ const helperBytes = 23627865;
 const helperDigest = '622ed48023cac1daa52a3bf3a6ac38f03514de214b5f0fa069389fd0f6d17e5c';
 const helperUrl = `https://github.com/yt-dlp/yt-dlp/releases/download/${helperVersion}/yt-dlp.exe`;
 const youtubeHosts = new Set(['youtube.com','www.youtube.com','m.youtube.com','music.youtube.com','youtu.be','www.youtu.be']);
+export const mp3Bitrates = [320,256,224,192,160,128,96,64];
 
 export function youtubeVideo(value) {
   let url;
@@ -32,27 +33,38 @@ const hasSound = format => typeof format.acodec==='string' && format.acodec!=='n
 const hasPicture = format => typeof format.vcodec==='string' && format.vcodec!=='none';
 const bytes = format => Number(format.filesize || format.filesize_approx) || null;
 
-export function youtubeQualities(formats) {
-  const valid = (formats || []).filter(format=>format && /^[a-z\d_.-]{1,80}$/i.test(format.format_id || '') && !format.has_drm);
-  const audios = valid.filter(format=>hasSound(format) && !hasPicture(format)).sort((a,b)=>(b.abr || b.tbr || 0)-(a.abr || a.tbr || 0));
+function videoQualities(formats,audios,videoOnly) {
   const byQuality = new Map();
-  for (const video of valid) {
+  for (const video of formats) {
     if (!hasPicture(video) || !Number.isFinite(video.width) || !Number.isFinite(video.height) || Math.min(video.width,video.height)<80) continue;
     const mp4 = video.ext==='mp4';
     const webm = video.ext==='webm';
     if (!mp4 && !webm) continue;
-    const audio = hasSound(video) ? null : audios.find(item=>mp4 ? item.ext==='m4a' : webm && item.ext==='webm') || audios[0];
+    const embedded = hasSound(video);
+    const audio = videoOnly || embedded ? null : audios.find(item=>mp4 ? item.ext==='m4a' : item.ext==='webm') || audios[0];
+    if (!videoOnly && !embedded && !audio) continue;
     const ext = mp4 && (!audio || audio.ext==='m4a') ? 'mp4' : webm && (!audio || audio.ext==='webm') ? 'webm' : 'mkv';
     const fps = Math.round(video.fps || 0);
     const quality = `${video.width}x${video.height}-${fps || 30}`;
-    const score = (audio || hasSound(video) ? 10 : 0)+(ext==='mp4' && /^avc/.test(video.vcodec) ? 4 : ext==='webm' ? 3 : ext==='mp4' ? 2 : 1)+
-      (hasSound(video) ? .25 : 0);
+    const score = (ext==='mp4' && /^avc/.test(video.vcodec) ? 4 : ext==='webm' ? 3 : ext==='mp4' ? 2 : 1)+
+      (videoOnly !== embedded ? .25 : 0);
     if (byQuality.has(quality) && byQuality.get(quality).score>=score) continue;
     byQuality.set(quality,{quality,width:video.width,height:video.height,fps,ext,score,
       video:video.format_id,audio:audio?.format_id || null,
-      hasAudio:Boolean(audio || hasSound(video)),size:bytes(video) && (!audio || bytes(audio)) ? bytes(video)+(audio?bytes(audio):0) : null});
+      stripAudio:videoOnly && embedded,size:bytes(video) && (!audio || bytes(audio)) ? bytes(video)+(audio?bytes(audio):0) : null});
   }
   return [...byQuality.values()].sort((a,b)=>b.width*b.height-a.width*a.height || b.fps-a.fps || b.score-a.score);
+}
+
+export function youtubeQualities(formats) {
+  const valid = (formats || []).filter(format=>format && /^[a-z\d_.-]{1,80}$/i.test(format.format_id || '') && !format.has_drm);
+  const audios = valid.filter(format=>hasSound(format) && !hasPicture(format)).sort((a,b)=>(b.abr || b.tbr || 0)-(a.abr || a.tbr || 0));
+  const embeddedAudio = () => valid.filter(hasSound).sort((a,b)=>(b.abr || 0)-(a.abr || 0) || (a.tbr || 0)-(b.tbr || 0))[0];
+  return {
+    combined:videoQualities(valid,audios,false),
+    video:videoQualities(valid,audios,true),
+    audio:(audios[0] || embeddedAudio())?.format_id
+  };
 }
 
 function cleanTitle(title) {
@@ -67,7 +79,7 @@ function friendlyError(error) {
   return new Error(line.replace(/^ERROR:\s*/, '').slice(0,230));
 }
 
-export function createYoutubeImporter({ data, run, ffmpeg, ingest }) {
+export function createYoutubeImporter({ data, run, runTimed, ffmpeg, ingest }) {
   const cache = join(data,'tools');
   const target = join(cache,`yt-dlp-${helperVersion}.exe`);
   let verified = false;
@@ -131,7 +143,7 @@ export function createYoutubeImporter({ data, run, ffmpeg, ingest }) {
       if (info.id!==video.id) throw new Error('The link did not return the requested YouTube video.');
       if (['is_live','is_upcoming'].includes(info.live_status)) throw new Error('Choose a video that has finished broadcasting.');
       const choices = youtubeQualities(info.formats);
-      if (!choices.length) throw new Error('YouTube did not return a downloadable video quality for this link.');
+      if (!choices.video.length && !choices.audio) throw new Error('YouTube did not return downloadable media for this link.');
       return {video,title:cleanTitle(info.title),duration:Number(info.duration) || null,choices};
     },
     async download(info,choice) {
@@ -150,17 +162,29 @@ export function createYoutubeImporter({ data, run, ffmpeg, ingest }) {
             }
           };
         };
-        taskStage('Downloading video');
-        const format = choice.audio ? `${choice.video}+${choice.audio}` : choice.video;
+        const {video,audio,ext,bitrate,stripAudio} = choice;
+        taskStage(bitrate?'Downloading audio':'Downloading video');
+        const format = video && audio ? `${video}+${audio}` : video || audio;
         await command(['--newline','--progress','--progress-template','download:FRAMECUT %(info.format_id)s %(progress._percent_str)s',
           '--concurrent-fragments','4','--fragment-retries','3','--abort-on-unavailable-fragments','-f',format,
-          '--merge-output-format',choice.ext,'-o','source.%(ext)s','--',info.video.url],
+          ...(video && audio?['--merge-output-format',ext]:[]),'-o','source.%(ext)s','--',info.video.url],
           {cwd:folder,progress:progress(),stderrProgress:progress()});
         taskSignal()?.throwIfAborted();
-        const output = (await readdir(folder)).find(name=>/^source\.(mp4|webm|mkv)$/i.test(name));
-        if (!output) throw new Error('The download did not produce a complete video file.');
-        taskStage('Adding the video to Footage');
-        return await ingest(`${info.title}.${output.split('.').at(-1)}`,destination=>rename(join(folder,output),destination));
+        const source = (await readdir(folder)).find(name=>/^source\.[a-z\d]+$/i.test(name));
+        if (!source) throw new Error('The download did not produce a complete media file.');
+        let output = source;
+        if (bitrate) {
+          output = 'audio.mp3';
+          await runTimed(['-nostdin','-v','error','-i',source,'-map','0:a:0','-vn',
+            '-c:a','libmp3lame','-ar','48000','-b:a',`${bitrate}k`,output],{cwd:folder},'Encoding MP3',info.duration);
+        } else if (stripAudio) {
+          output = `video.${ext}`;
+          await runTimed(['-nostdin','-v','error','-i',source,'-map','0:v:0','-an','-c:v','copy',output],
+            {cwd:folder},'Removing audio',info.duration);
+        }
+        taskSignal()?.throwIfAborted();
+        taskStage('Adding to Footage');
+        return await ingest(`${info.title}.${output.split('.').at(-1)}`,destination=>rename(join(folder,output),destination),bitrate?'audio/mpeg':null);
       } finally { await rm(folder,{recursive:true,force:true}).catch(()=>{}); }
     }
   };

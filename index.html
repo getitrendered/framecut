@@ -229,7 +229,12 @@
       <button id="youtube-check" class="secondary" type="submit">Check available qualities</button>
       <div id="youtube-options" hidden>
         <strong id="youtube-title"></strong>
-        <label class="property"><span>Video quality</span><select id="youtube-quality"></select></label>
+        <label class="property"><span>Download format</span><select id="youtube-mode">
+          <option value="combined">Video + audio</option>
+          <option value="video">Video only</option>
+          <option value="audio">MP3 only</option>
+        </select></label>
+        <label class="property"><span id="youtube-quality-label">Video quality</span><select id="youtube-quality"></select></label>
       </div>
       <progress id="youtube-progress" max="100" aria-label="YouTube import progress" hidden></progress>
       <output id="youtube-status" class="subtle" role="status"></output>

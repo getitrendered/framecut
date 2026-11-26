@@ -18,7 +18,7 @@ import { findLoop } from './loop.mjs';
 import { clipMix, trackOf, trackSettings } from './tracks.mjs';
 import { activityList, cancelTask, taskDetails, taskId, taskSignal, taskStage, withTask } from './activity.mjs';
 import { backgroundKey, keyParameters } from './keying.mjs';
-import { createYoutubeImporter, youtubeVideo } from './youtube.mjs';
+import { createYoutubeImporter, mp3Bitrates, youtubeVideo } from './youtube.mjs';
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const data = resolve(process.env.FRAMECUT_DATA || join(root, 'data'));
@@ -184,13 +184,10 @@ async function importVideo(req) {
   return importMedia(name,path=>copyMedia(req,path,Number(req.headers['x-file-size'] || req.headers['content-length'])));
 }
 
-const youtube = createYoutubeImporter({data,run,ffmpeg,async ingest(name,transfer) {
+const youtube = createYoutubeImporter({data,run,runTimed,ffmpeg,async ingest(name,transfer,audioMime) {
+  if (audioMime) return addAudio(name,(_,target)=>transfer(target),audioMime);
   const id = randomUUID();
-  try { return await ingest(id,name,transfer,{registerEarly:true}); }
-  catch (error) {
-    if (taskSignal()?.aborted) await rm(join(assetRoot,id),{recursive:true,force:true}).catch(()=>{});
-    throw error;
-  }
+  return ingest(id,name,transfer,{registerEarly:true});
 }});
 
 function startYoutubeJob(label,operation) {
@@ -202,6 +199,10 @@ function startYoutubeJob(label,operation) {
     job.taskId = taskId();
     try {
       const result = await operation(job);
+      if (taskSignal().aborted && result.id) {
+        assets.delete(result.id);
+        await rm(join(assetRoot,result.id),{recursive:true,force:true}).catch(()=>{});
+      }
       taskSignal().throwIfAborted();
       Object.assign(job,{status:'ready',result});
     } catch (error) {
@@ -260,25 +261,26 @@ function importMedia(name, transfer) {
   }, { registerEarly: !still }));
 }
 
-async function addAudio(name, prepare) {
+async function addAudio(name, prepare, audioMime) {
   const id = randomUUID();
   const folder = join(assetRoot,id);
   await mkdir(folder);
   try {
     const target = join(folder,'source');
     await prepare(folder,target);
-    return await registerAudio(folder,id,name);
+    return await registerAudio(folder,id,name,audioMime);
   } catch (error) {
     await rm(folder,{recursive:true,force:true});
     throw error;
   }
 }
 
-async function registerAudio(folder,id,name) {
+async function registerAudio(folder,id,name,audioMime) {
   const info = JSON.parse(await run(ffprobe,['-v','error','-select_streams','a:0','-show_entries','stream=duration','-of','json','source'],{cwd:folder}));
   const frames = Math.ceil(Number(info.streams[0]?.duration)*fps);
   if (!frame(frames) || !frames) throw new Error('Choose a file containing readable audio.');
   const asset = { id,name,frames,kind:'audio',audio:0 };
+  if (audioMime) asset.audioMime = audioMime;
   await writeFile(join(folder,'info.partial'),JSON.stringify(asset));
   await rename(join(folder,'info.partial'),join(folder,'info.json'));
   assets.set(id,asset);
@@ -1247,8 +1249,9 @@ const server = createServer(async (req, res) => {
       if (path === '/api/luts') return json(res, 200, [...luts.values()]);
       if (path === '/api/tools') return json(res,200,{ objectRemoval:aiReady, transcription:Boolean(whisperHome) });
       if (path === '/api/fonts') return json(res,200,await installedFontNames());
-      const sound=/^\/media\/([a-f\d-]+)\/audio\.wav$/.exec(path);
-      if(sound && assets.has(sound[1]) && assets.get(sound[1]).audio !== null) return await serveFile(req,res,await audioPreview(assets.get(sound[1])),'audio/wav');
+      const sound=/^\/media\/([a-f\d-]+)\/audio\.(?:wav|mp3)$/.exec(path);
+      const soundAsset = sound && assets.get(sound[1]);
+      if(soundAsset && soundAsset.audio !== null) return await serveFile(req,res,await audioPreview(soundAsset),soundAsset.audioMime || 'audio/wav');
       const program = /^\/media\/([a-f\d-]+)\/p-(auto|full|half|quarter|low)(?:-([a-f\d-]+))?\.(mp4|webm)$/.exec(path);
       if (program && assets.has(program[1]) && (!program[3] || luts.has(program[3]))) {
         const asset=assets.get(program[1]);
@@ -1279,17 +1282,24 @@ const server = createServer(async (req, res) => {
         return json(res,202,startYoutubeJob('Check YouTube video',async job=>{
           const info = await youtube.inspect(video);
           job.info = info;
-          return {title:info.title,duration:info.duration,choices:info.choices.map(({quality,width,height,fps,ext,size,hasAudio})=>
-            ({quality,width,height,fps,ext,size,hasAudio}))};
+          const {combined,video:videoOnly,audio} = info.choices;
+          const qualities = list=>list.map(({quality,width,height,fps,ext,size})=>({quality,width,height,fps,ext,size}));
+          return {title:info.title,duration:info.duration,modes:{
+            combined:qualities(combined),video:qualities(videoOnly),audio:audio?mp3Bitrates:[]
+          }};
         }));
       }
       if (path === '/api/youtube/download') {
-        const {id,quality} = await requestJson(req,4096);
+        const {id,mode='combined',quality,bitrate} = await requestJson(req,4096);
         const inspected = youtubeJobs.get(id);
-        const choice = inspected?.info?.choices.find(item=>item.quality===quality);
-        if (inspected?.status!=='ready' || !choice || Date.now()-inspected.started>20*60*1000) {
+        if (inspected?.status!=='ready' || !inspected.info || Date.now()-inspected.started>20*60*1000) {
           return json(res,400,{error:'Check the YouTube link again and choose one of its available qualities.'});
         }
+        const choices = inspected.info.choices;
+        let choice;
+        if (mode==='audio' && choices.audio && mp3Bitrates.includes(bitrate)) choice = {audio:choices.audio,bitrate};
+        if (mode==='combined' || mode==='video') choice = choices[mode].find(item=>item.quality===quality);
+        if (!choice) return json(res,400,{error:'Choose an available YouTube format and quality.'});
         return json(res,202,startYoutubeJob(`Import ${inspected.info.title}`,()=>youtube.download(inspected.info,choice)));
       }
       if (path === '/api/media') return json(res, 201, await importVideo(req));

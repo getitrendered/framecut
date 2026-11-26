@@ -133,6 +133,7 @@ const pixels = frame => frame * zoom / fps;
 const seconds = frame => frame / fps;
 const frameAt = clientX => Math.round((clientX - space.getBoundingClientRect().left) * fps / zoom);
 const diskURL = (asset, file) => `/media/${asset}/${file}`;
+const audioURL = id => diskURL(id,bin.get(id)?.audioMime==='audio/mpeg'?'audio.mp3':'audio.wav');
 const notify = message => {
   $('status').textContent = message;
   $('task-list').textContent = message;
@@ -793,6 +794,7 @@ function setupYoutubeImport() {
   const check = $('youtube-check');
   const download = $('youtube-download');
   const options = $('youtube-options');
+  const mode = $('youtube-mode');
   const quality = $('youtube-quality');
   const bar = $('youtube-progress');
   const status = $('youtube-status');
@@ -801,13 +803,27 @@ function setupYoutubeImport() {
   let inspected, job, busy, imported, shownProject;
 
   function controls() {
-    url.disabled = check.disabled = quality.disabled = Boolean(busy);
+    url.disabled = check.disabled = mode.disabled = quality.disabled = Boolean(busy);
     options.hidden = !inspected;
     download.hidden = !inspected;
     download.disabled = Boolean(busy);
     stop.hidden = !busy;
     stop.disabled = !job?.taskId;
     show.hidden = !imported || Boolean(busy);
+  }
+
+  function showQualities() {
+    const audio = mode.value==='audio';
+    $('youtube-quality-label').textContent = audio ? 'MP3 bitrate' : 'Video quality';
+    const selected = quality.value;
+    quality.replaceChildren(...inspected.modes[mode.value].map((item,index)=>{
+      if (audio) return new Option(`${item} kbps`,String(item));
+      const {quality,width,height,fps,ext,size} = item;
+      const frameRate = fps ? ` · ${fps} fps` : '';
+      const amount = size ? ` · ~${Math.max(1,Math.round(size/1048576))} MB` : '';
+      return new Option(`${index===0?'Best · ':''}${width} × ${height}${frameRate} · ${ext.toUpperCase()}${amount}`,quality);
+    }));
+    if ([...quality.options].some(option=>option.value===selected)) quality.value = selected;
   }
 
   async function run(kind,body) {
@@ -864,14 +880,10 @@ function setupYoutubeImport() {
       } else {
         inspected = {id:job.id,...state.result};
         $('youtube-title').textContent = inspected.title;
-        quality.replaceChildren(...inspected.choices.map(({quality,width,height,fps,ext,size,hasAudio},index)=>{
-          const frameRate = fps ? ` · ${fps} fps` : '';
-          const amount = size ? ` · ~${Math.max(1,Math.round(size/1048576))} MB` : '';
-          const label = `${index===0?'Best · ':''}${width} × ${height}${frameRate} · ${ext.toUpperCase()}${amount}${hasAudio?'':' · No audio'}`;
-          return new Option(label,quality);
-        }));
+        for (const option of mode.options) option.disabled = !inspected.modes[option.value].length;
+        if (!mode.value || mode.selectedOptions[0].disabled) mode.value = [...mode.options].find(option=>!option.disabled).value;
+        showQualities();
         status.textContent = '';
-        if (dialog.open) quality.focus();
       }
     } catch (error) {
       status.textContent = error.message;
@@ -885,6 +897,7 @@ function setupYoutubeImport() {
       }
       updateProgress(bar,null);
       controls();
+      if (!adding && inspected && dialog.open) mode.focus();
     }
   }
 
@@ -893,6 +906,8 @@ function setupYoutubeImport() {
     if (!busy && shownProject!==entry.id) {
       inspected = imported = null;
       url.value = status.textContent = '';
+      mode.value = 'combined';
+      quality.replaceChildren();
       controls();
     }
     shownProject = entry.id;
@@ -903,7 +918,12 @@ function setupYoutubeImport() {
   $('youtube-close').onclick=()=>dialog.close();
   url.oninput=()=>{ inspected = imported = null; status.textContent = ''; controls(); };
   form.onsubmit=event=>{ event.preventDefault(); void run('inspect',{url:url.value}); };
-  download.onclick=()=>{ if (inspected) void run('download',{id:inspected.id,quality:quality.value}); };
+  mode.onchange=showQualities;
+  download.onclick=()=>{
+    if (!inspected) return;
+    const choice = mode.value==='audio' ? {bitrate:Number(quality.value)} : {quality:quality.value};
+    void run('download',{id:inspected.id,mode:mode.value,...choice});
+  };
   stop.onclick=async()=>{
     if (!job?.taskId) return;
     stop.disabled = true;
@@ -968,7 +988,7 @@ function renderSource() {
     return;
   }
   if (isAudio) {
-    const url = diskURL(asset.id,'audio.wav');
+    const url = audioURL(asset.id);
     if (audio.getAttribute('src')!==url) audio.src = url;
   } else {
   const url = programUrl({asset:asset.id},'auto');
@@ -3927,7 +3947,7 @@ function displaySounds(frame,seek,sequence=project,media=audioPlayers,parentMix)
     let el=media.get(clip.id);
     const fresh=!el;
     if(fresh){
-      el=new Audio(diskURL(clip.asset,'audio.wav'));
+      el=new Audio(audioURL(clip.asset));
       el.preload='auto';
       el.addEventListener('loadedmetadata',()=>{
         if(el.pendingSeek!==undefined){mediaPosition(el,el.pendingSeek);delete el.pendingSeek;}
